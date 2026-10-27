@@ -1,0 +1,22 @@
+# The Discord bot (Worker "dmo-bot"). Deployed by Cloudflare Workers Builds on every push to main.
+# Secrets (BOT_TOKEN, SHEETS_SECRET, REGISTER_KEY) stay in the dashboard and are never written here.
+name = "dmo-bot"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+workers_dev = true
+keep_vars = true            # anything else set in the dashboard is kept
+
+[vars]
+# The site's address on the NEW account (Workers & Pages ▸ rna-hq ▸ the *.pages.dev link at the top)
+SHEETS_URL = "https://rna-hq.pages.dev/api/bot"
+HQ_URL = "https://rna-hq.pages.dev/api/public"
+
+[[kv_namespaces]]
+binding = "BOT_KV"
+id = "8cba0bf8155546358ffe133993b275f6"   # Storage & databases ▸ KV ▸ the bot's namespace ▸ ID (not a secret)
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[observability]
+enabled = true
