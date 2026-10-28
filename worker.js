@@ -862,12 +862,22 @@ async function syncRequest(env, b) {
     row = statusRow(`Denied by ${who}`, "✖️");
     colour = CONFIG.COLOURS.denied;
     dmText = `✖️ **Your ${t.title} was denied** by ${who}.\n**Reason:** ${String(b.reason || "No reason given").slice(0, 900)}`;
+    // An application: their code stays valid (48 hours from now), so they can fix it and send it again.
+    if (type === "roster" && b.submittedById && env.BOT_KV) {
+      const c = await kvGet(env, "code:" + b.submittedById, null);
+      if (c && c.code) {
+        c.at = Date.now();                               // counted from now
+        await kvPut(env, "code:" + b.submittedById, c, 48 * 3600);
+        dmText += `\n\nYour code **${c.code}** still works for the next 48 hours — fix what's needed and run **/roster submit** again (no need for /roster start).`;
+      }
+    }
   }
   if (row) await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
   // Approved roster / award request: give that person their roles straight away.
   if (b.status === "Done" && (type === "roster" || type === "award") && CONFIG.GUILD_ID) {
     const r = await rolesAfterRequest(env, path, b).catch(e => ({ error: e.message }));
     if (r && !r.error && (r.added.length || r.removed.length)) dmText += "\n🎭 Your Discord roles have been updated to match the roster.";
+    if (r && !r.error) await markRequestRoles(env, b.id, "done");
     if (r && r.error) console.warn("Roles after " + b.id + ": " + r.error);
   }
   if (dmText && b.submittedById) await dm(env, b.submittedById, { embeds: [{ author: { name: CONFIG.NAME }, color: colour, description: dmText, timestamp: new Date().toISOString() }] });
@@ -2164,7 +2174,10 @@ async function rosterStart(env, i) {
   const roster = await loadRoster(env).catch(() => null);
   const me = roster ? findPerson(roster, i) : null;
   if (me) return editReply(env, i, `You're already on the roster as **${me.r || me.d}** (${me.k}). To change your rank or details, use **/roster update**.`);
-  const c = await rosterCode(env, u.id, true);
+  const had = await rosterCode(env, u.id, false);
+  const c = had || await rosterCode(env, u.id, true);
+  if (had && env.BOT_KV) return editReply(env, i, `🔢 You already have a code: **${c.codes[0]}** — it still works` +
+    ` (until <t:${Math.floor((c.at + 48 * 3600000) / 1000)}:f> at the latest). Use it in your screenshot and run **/roster submit**.`);
   return editReply(env, i, `🔢 Your code is **${c.codes[0]}**\n\n1. In game, type **${c.codes[0]}** in the chat.\n2. Take a screenshot showing the code **next to your name**.\n` +
     `3. Run **/roster submit** with your Roblox username, timezone, rank and the screenshot.\n\n-# The code lasts ${env.BOT_KV ? "48 hours" : "until midnight UTC tomorrow"}. ` +
     "Screenshots are sent to Google to help check them; a person always decides.");
@@ -2403,6 +2416,7 @@ async function runCron(env, now) {
   // Roles: linked members whose rank, roster, DMO / CPM or awards changed on the roster since the last run
   // (promotions on the website, approved requests, awards …). Turn off with CONFIG.ROLE_AUTO_SYNC = false.
   if (CONFIG.ROLE_AUTO_SYNC !== false) await step("roles", () => cronRoleChanges(env, now));
+  if (CONFIG.ROLE_AUTO_SYNC !== false) await step("request roles", () => cronRequestRoles(env, now));
   return log;
 }
 
@@ -2433,6 +2447,38 @@ async function cronRoleChanges(env, now) {
   await kvPut(env, "state:rolesig", next);
   if (!saved) return "remembered " + Object.keys(next).length + " linked members";
   return out.length ? "synced " + out.join(", ") + (changed.length > 8 ? " (+" + (changed.length - 8) + " next run)" : "") : "";
+}
+
+// Approved roster / award requests whose roles weren't given yet (if the roster's "Done" message didn't get
+// through): links new members, then gives the roles. Each request is tried up to 3 times.
+async function markRequestRoles(env, id, how) {
+  const st = await kvGet(env, "state:reqroles", {}) || {};
+  st[id] = how; await kvPut(env, "state:reqroles", st, 4 * 86400);
+}
+async function cronRequestRoles(env, now) {
+  if (!CONFIG.GUILD_ID || !env.BOT_KV || !linked(env)) return "";
+  const res = await bridge(env, { action: "doneRequests", since: now - 3 * 86400000 });
+  if (!res.ok) throw new Error(res.error);
+  const st = await kvGet(env, "state:reqroles", {}) || {};
+  const out = [];
+  let n = 0;
+  for (const x of res.items || []) {
+    const s = st[x.id];
+    if (s === "done" || s === "gave up" || n >= 5) continue;
+    if (!x.discordId || !x.emp) { st[x.id] = "gave up"; out.push(x.id + ": not found on the roster"); continue; }
+    n++;
+    if (/^roster-/.test(x.id) && !x.linkedTo) {
+      const l = await bridge(env, { action: "linkDiscord", emp: x.emp, discordId: x.discordId, by: "self", targetName: x.discord }).catch(e => ({ ok: false, error: e.message }));
+      if (l.ok) out.push(x.id + ": linked to #" + x.emp);
+    }
+    const r = await syncRolesFor(env, x.discordId, x.linkedTo || x.emp, "link").catch(e => ({ error: e.message }));
+    const tries = (typeof s === "number" ? s : 0) + 1;
+    if (!r.error || r.error === "not in the server") st[x.id] = "done";
+    else st[x.id] = tries >= 3 ? "gave up" : tries;
+    out.push(x.id + ": " + (r.error ? r.error : "roles +" + (r.added || []).length + "/-" + (r.removed || []).length));
+  }
+  await kvPut(env, "state:reqroles", st, 4 * 86400);
+  return out.join(", ");
 }
 
 async function cronEvents(env, now) {
