@@ -2364,6 +2364,9 @@ async function decideRequest(env, i, kind, decision, extra) {
       submittedById: res.submittedById || "", where: "Discord" });
   }
   if (decision === "approve") {
+    // Already carried out by the roster (the usual case now): its "Done" / "Error" has updated the message
+    // and given the roles, so it's left as that says.
+    if (res.status === "Done" || res.status === "Error") return;
     const what = kind === "loa" ? `LOA ${isoToUk(extra.start)} – ${isoToUk(extra.end)} · ` : "";
     await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`,
       { components: [statusRow(`${what}Approved by ${who} — the roster adds it within a minute`, "⏳")], allowed_mentions: NO_PINGS }).catch(() => {});
