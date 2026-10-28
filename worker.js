@@ -880,7 +880,12 @@ async function syncRequest(env, b) {
     // Straight to the person who sent it, through their link (the roster links a new member just before
     // it says "Done"); else worked out from the request message.
     let r = null;
-    if (b.submittedById) {
+    // Sent along by the roster: no need to ask it (asking back while it's calling us can be blocked).
+    if (b.submittedById && b.roleInfo && b.roleInfo.e) {
+      ROSTER = null;
+      r = await syncRolesFor(env, String(b.submittedById), b.roleInfo.e, "link", null, { person: b.roleInfo, awardNames: b.awardNames || [] }).catch(e => ({ error: e.message }));
+    }
+    if ((!r || r.error) && b.submittedById) {
       const l = await bridge(env, { action: "links", discordId: String(b.submittedById) }).catch(() => null);
       const emp = l && l.ok && (l.links || [])[0] && l.links[0].emp;
       if (emp) { ROSTER = null; r = await syncRolesFor(env, String(b.submittedById), emp, "link").catch(e => ({ error: e.message })); }
@@ -2881,13 +2886,14 @@ async function roleOp(env, method, userId, roleId) {
 // One person, right now (after /link, or /notify). Returns what changed.
 // mode "link": everything, group roles included. "auto": group roles only on a tier / department change.
 // names: {discord, roblox} to find them by name instead (after an approved request).
-async function syncRolesFor(env, userId, emp, mode, names) {
+async function syncRolesFor(env, userId, emp, mode, names, given) {
   if (!CONFIG.GUILD_ID) return { changes: 0, added: [], removed: [], error: "GUILD_ID isn't set" };
-  // Quick path: just this person, straight from the roster (bridge "roleinfoOne" / "roleinfoName").
+  // Quick path: just this person — sent by the roster with "Done" (given), else asked for
+  // (bridge "roleinfoOne" / "roleinfoName").
   let byEmp = null, entry = null;
-  const one = await bridge(env, names
+  const one = given && given.person ? { ok: true, person: given.person, awardNames: given.awardNames } : await bridge(env, names
     ? { action: "roleinfoName", discord: String(names.discord || ""), roblox: String(names.roblox || "") }
-    : { action: "roleinfoOne", emp: String(emp || "") }).catch(() => ({ ok: false }));
+    : { action: "roleinfoOne", emp: String(emp || "") }).catch(e => ({ ok: false, error: e.message }));
   if (one.ok) {
     AWARD_NAMES = one.awardNames || AWARD_NAMES;
     const p = one.person;
@@ -2900,6 +2906,7 @@ async function syncRolesFor(env, userId, emp, mode, names) {
     byEmp = await hqRosterByEmp(env, true);
     entry = byEmp[normEmp(emp)];
   }
+  if (!entry && !one.ok) return { error: "couldn't reach the roster (" + String(one.error || "no answer").slice(0, 60) + ")" };
   if (!entry) return { error: names ? `${names.discord || names.roblox} isn't on the roster yet`
     : `employee #${emp || "?"} wasn't found on the roster — ${ROLE_SOURCE || "roster via bridge"}` };
   const member = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/members/${userId}`).catch(() => null);
