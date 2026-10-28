@@ -2206,6 +2206,11 @@ async function rosterSubmit(env, i, o) {
     if (!roster) return editReply(env, i, "Couldn't reach the roster to check your application — try again in a minute. Nothing was sent.");
     const me = findPerson(roster, i);
     if (me) return editReply(env, i, `You're already on the roster as **${me.r || me.d}** (${me.k}). To change your rank or details, use **/roster update**.`);
+    // One application at a time: wait for the last one to be approved or denied.
+    const open = await bridge(env, { action: "pendingApplication", discordId: String(u.id || "") }).catch(() => null);
+    if (open && open.ok && open.pending) return editReply(env, i, "⏳ You already have a roster application waiting" +
+      (open.pending.at ? ` (sent <t:${Math.floor(open.pending.at / 1000)}:R>)` : "") +
+      ". You can send another once it's been **approved or denied** — you'll get a DM when it is.");
     const c = await rosterCode(env, u.id, false);
     if (!c) return editReply(env, i, "Run **/roster start** first to get your code, then put it in your screenshot.");
     const rb = await robloxUser(cleanLine(o.roblox, 40).replace(/^@/, "")).catch(() => ({ unknown: true }));
