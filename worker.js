@@ -2402,13 +2402,13 @@ async function runCron(env, now) {
   await step("approvals", () => cronApprovalReminders(env, now));
   // Roles: linked members whose rank, roster, DMO / CPM or awards changed on the roster since the last run
   // (promotions on the website, approved requests, awards …). Turn off with CONFIG.ROLE_AUTO_SYNC = false.
-  if (CONFIG.ROLE_AUTO_SYNC !== false) await step("roles", () => cronRoles(env, now));
+  if (CONFIG.ROLE_AUTO_SYNC !== false) await step("roles", () => cronRoleChanges(env, now));
   return log;
 }
 
 // Compares each linked member's roster details with the last run; only those that changed get a role sync
 // (at most 8 a run — the rest are picked up next time). The first run only remembers.
-async function cronRoles(env, now) {
+async function cronRoleChanges(env, now) {
   if (!CONFIG.GUILD_ID || !env.BOT_KV || !linked(env)) return "";
   const [info, links] = await Promise.all([bridge(env, { action: "roleinfo" }), bridge(env, { action: "links" })]);
   if (!info.ok || !links.ok) throw new Error((info.error || links.error || "roster unreachable"));
