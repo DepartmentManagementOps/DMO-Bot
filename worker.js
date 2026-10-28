@@ -55,6 +55,7 @@ const CONFIG = {
 
   // ---- Community features (leave "" to switch a feature off) ----
   GUILD_ID: "1366403142945607790",                 // your server's ID (role sync + links in score notes)
+  ROLE_AUTO_SYNC: true,                            // every 5 min: roles for linked members whose roster details changed
   HQ_URL: "",                   // the HQ site's public API, e.g. https://rna-hq.pages.dev/api/public (reads ?api=events, profile, hqroster, home, market)
   HQ_PROFILE_URL: "",           // someone's HQ profile page; {emp} = their employee #, e.g. "https://…/exec?page=profile&emp={emp}"
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
@@ -136,13 +137,15 @@ export default {
     if (request.method === "POST" && url.pathname === "/sync") {
       const body = await request.json().catch(() => ({}));
       if (!env.SHEETS_SECRET || body.secret !== env.SHEETS_SECRET) return new Response("Not allowed", { status: 403 });
-      try {
+      // Answered straight away: the roster only waits 5 seconds, and editing the message, giving roles
+      // and sending the DM can take longer — the work carries on after the answer (waitUntil).
+      const work = (async () => {
         if (body.type === "score") await syncScore(env, body);
         else if (/^(award|roster|loa)-/.test(String(body.id || ""))) await syncRequest(env, body);
         else await syncFromRoster(env, body);
-        return json({ ok: true });
-      }
-      catch (e) { return json({ ok: false, error: e.message }); }
+      })().catch(e => console.error("sync " + (body.id || "") + ": " + (e && e.stack || e)));
+      ctx.waitUntil(work);
+      return json({ ok: true });
     }
 
     // The roster's Approvals page asks for a log's proof screenshot (the
@@ -226,7 +229,7 @@ async function diagnose(env) {
       const linked = ((links && links.links) || []).map(l => ({ discordId: l.discordId, emp: l.emp,
         onRoster: !!byEmp[normEmp(l.emp)], rank: byEmp[normEmp(l.emp)] ? String(pick(byEmp[normEmp(l.emp)], ["rank"], "")) : "",
         awards: byEmp[normEmp(l.emp)] ? byEmp[normEmp(l.emp)].awards || "none read" : "" }));
-      out.roles = { source: ROLE_SOURCE, awardsOnRoster: AWARD_NAMES.length ? AWARD_NAMES : "NONE — update BotActions.gs in the bridge and deploy a New version", linked: linked.slice(0, 15), managed: Object.keys(plan.managed).map(id => plan.managed[id].name),
+      out.roles = { source: ROLE_SOURCE, awardsOnRoster: AWARD_NAMES.length ? AWARD_NAMES : "NONE — no awards came back from the roster", linked: linked.slice(0, 15), managed: Object.keys(plan.managed).map(id => plan.managed[id].name),
         aboveTheBot: plan.tooHigh, sameNameIgnored: plan.duplicates, botRole: plan.botRole, botFound: plan.botFound, serverRoles: plan.serverRoles,
         rosterRanks: Object.keys(ranks).sort() };
     } catch (e) { out.roles = "ERROR: " + e.message; }
@@ -245,9 +248,10 @@ const linked = (env) => !!(env.SHEETS_URL && env.SHEETS_SECRET);
 let ROSTER = null; // { at, list: [{d, r, k}], by: { lowername: person } }
 let ROSTER_LOADING = null;
 
-function loadRoster(env) {
+// The roster's names, kept for a minute (the database answers quickly). maxAge 0 = fetch now.
+function loadRoster(env, maxAge) {
   if (!linked(env)) return Promise.resolve(null);
-  if (ROSTER && Date.now() - ROSTER.at < 5 * 60 * 1000) return Promise.resolve(ROSTER);
+  if (ROSTER && Date.now() - ROSTER.at < (maxAge === undefined ? 60 * 1000 : maxAge)) return Promise.resolve(ROSTER);
   if (!ROSTER_LOADING) {
     ROSTER_LOADING = bridge(env, { action: "names" }).then(res => {
       ROSTER_LOADING = null;
@@ -259,6 +263,14 @@ function loadRoster(env) {
     }).catch(e => { ROSTER_LOADING = null; throw e; });
   }
   return ROSTER_LOADING;
+}
+
+// Someone not found in the kept copy may have just been added: fetch the names again (at most every 10 s).
+async function rosterLookup(env, name) {
+  const key = String(name || "").trim().replace(/^@/, "").toLowerCase();
+  let roster = await loadRoster(env).catch(() => null);
+  if (roster && key && !roster.by[key]) roster = await loadRoster(env, 10 * 1000).catch(() => roster);
+  return { roster, p: roster && key ? roster.by[key] || null : null };
 }
 
 // Roster suggestions for what's been typed so far (up to 25).
@@ -879,7 +891,18 @@ async function rolesAfterRequest(env, path, b) {
   if (!userId && b.submittedById && (!discordName || discordName.toLowerCase() === "—")) userId = b.submittedById;
   if (!userId) return { error: `couldn't find ${discordName || "them"} in the server` };
   ROSTER = null;                                    // the roster just changed
-  return syncRolesFor(env, userId, "", "link", { discord: discordName === "—" ? "" : discordName, roblox: roblox === "—" ? "" : roblox });
+  const r = await syncRolesFor(env, userId, "", "link", { discord: discordName === "—" ? "" : discordName, roblox: roblox === "—" ? "" : roblox });
+  // A new member: link their Discord account to the roster entry just made, so later rank / award
+  // changes reach their roles too (only when the Discord name on the roster is theirs).
+  if (/^roster-/.test(String(b.id || "")) && discordName && discordName !== "—") {
+    const one = await bridge(env, { action: "roleinfoName", discord: discordName, roblox: "" }).catch(() => null);
+    const emp = one && one.ok && one.person && one.person.e;
+    if (emp) {
+      const l = await bridge(env, { action: "linkDiscord", emp: emp, discordId: userId, by: "self", targetName: discordName }).catch(() => null);
+      if (l && l.ok && r && !r.error) r.linked = emp;
+    }
+  }
+  return r;
 }
 
 // ---- Roster data for requests ----
@@ -937,8 +960,10 @@ function findPerson(roster, i) {
 // Who's logging: their roster entry by Discord name first (no extra request), else by a /link.
 // The entry ({ d, r, k, s, e }), false = not on the roster, null = the roster couldn't be reached.
 async function loggerOf(env, roster, i) {
-  const p = roster && findPerson(roster, i);
+  let p = roster && findPerson(roster, i);
   if (p) return p;
+  const fresh = await loadRoster(env, 10 * 1000).catch(() => null);
+  if (fresh) { roster = fresh; p = findPerson(roster, i); if (p) return p; }
   const u = caller(i);
   const l = await bridge(env, { action: "links", discordId: String(u.id || "") }).catch(() => null);
   if (l && l.ok) {
@@ -1641,8 +1666,8 @@ async function reviewerCheck(env, user, fresh) {
   const res = await bridge(env, { action: "reviewer", discordId: userId, name: userName }).catch(e => ({ ok: false, error: e.message }));
   if (!res.ok) return { ok: false, unknown: true, reason: "Couldn't reach the roster to check you're DMO (" + res.error + ")." };
   const r = { at: Date.now(), ok: !!res.dmo, cpm: !!res.cpm, linked: !!res.linked, name: res.name || "",
-    cpmReason: !res.cpm ? `🔒 Only **CPM** members can decide LOA requests — your Discord name${userName ? ` (**${userName}**)` : ""} isn't in the CPM block on the roster's Departments tab.` : "",
-    reason: !res.dmo ? `🔒 Only **DMO** members can do that — your Discord name${userName ? ` (**${userName}**)` : ""} isn't in the DMO block on the roster's Departments tab.` : "" };
+    cpmReason: !res.cpm ? `🔒 Only **CPM** members can decide LOA requests — your Discord name${userName ? ` (**${userName}**)` : ""} isn't in CPM on the roster (a DMO / CPM title on your roster entry).` : "",
+    reason: !res.dmo ? `🔒 Only **DMO** members can do that — your Discord name${userName ? ` (**${userName}**)` : ""} isn't in DMO on the roster (a DMO / CPM title on your roster entry).` : "" };
   REVIEWERS[userId] = r;
   await kvPut(env, "rev2:" + userId, r, 600).catch(() => {});
   return r;
@@ -1793,7 +1818,7 @@ async function eventSchedule(env, i, o) {
     const u = caller(i);
     const res = await bridge(env, { action: "scheduleEvent", id: "ev-" + i.id, event: e, byId: u.id, byName: u.username || "" })
       .catch(err => ({ ok: false, error: err.message }));
-    if (!res.ok) return editReply(env, i, "❌ Couldn't add it to the HQ Events tab: " + res.error);
+    if (!res.ok) return editReply(env, i, "❌ Couldn't add it to the HQ events: " + res.error);
 
     // Announce it now (the 5-minute check won't announce it again).
     let note = "";
@@ -2052,13 +2077,13 @@ async function linkCommand(env, i, o) {
       const res = await bridge(env, { action: "links", discordId: o.member || u.id });
       const l = res.ok && (res.links || [])[0];
       if (!l) return editReply(env, i, (o.member ? `<@${o.member}> isn't` : "You aren't") + " linked to a roster entry yet. Use **/link name:** and pick the roster name.");
-      const p = roster.list.find(x => normEmp(x.e) === normEmp(l.emp));
+      const p = roster.list.find(x => normEmp(x.e) === normEmp(l.emp)) || ((await loadRoster(env, 10 * 1000).catch(() => roster)) || roster).list.find(x => normEmp(x.e) === normEmp(l.emp));
       // Already linked: refresh their roles from the roster.
       const r = CONFIG.GUILD_ID ? await syncRolesFor(env, o.member || u.id, l.emp).catch(err => ({ error: err.message })) : null;
       return editReply(env, i, `${o.member ? `<@${o.member}> is` : "You're"} linked to **${p ? (p.r || p.d) : "#" + l.emp}** (employee #${l.emp})` +
         (l.at ? ` since <t:${ts(toMs(l.at))}:D>` : "") + "." + (r ? "\n\n" + roleSummary(r) : ""));
     }
-    const p = roster.by[cleanLine(o.name, 60).replace(/^@/, "").toLowerCase()];
+    const p = roster.by[cleanLine(o.name, 60).replace(/^@/, "").toLowerCase()] || (await rosterLookup(env, cleanLine(o.name, 60))).p;
     if (!p) return editReply(env, i, `**${cleanLine(o.name, 60)}** isn't on the roster.`);
     if (!p.e) return editReply(env, i, `**${p.r || p.d}** has no employee number on the roster yet, so they can't be linked.`);
     const target = o.member || u.id;
@@ -2375,8 +2400,39 @@ async function runCron(env, now) {
   await step("events", () => cronEvents(env, now));
   await step("home", () => cronHome(env, now));
   await step("approvals", () => cronApprovalReminders(env, now));
-  // Roles are only changed by /link (no automatic role pass).
+  // Roles: linked members whose rank, roster, DMO / CPM or awards changed on the roster since the last run
+  // (promotions on the website, approved requests, awards …). Turn off with CONFIG.ROLE_AUTO_SYNC = false.
+  if (CONFIG.ROLE_AUTO_SYNC !== false) await step("roles", () => cronRoles(env, now));
   return log;
+}
+
+// Compares each linked member's roster details with the last run; only those that changed get a role sync
+// (at most 8 a run — the rest are picked up next time). The first run only remembers.
+async function cronRoles(env, now) {
+  if (!CONFIG.GUILD_ID || !env.BOT_KV || !linked(env)) return "";
+  const [info, links] = await Promise.all([bridge(env, { action: "roleinfo" }), bridge(env, { action: "links" })]);
+  if (!info.ok || !links.ok) throw new Error((info.error || links.error || "roster unreachable"));
+  const byEmp = {};
+  (info.people || []).forEach(p => { byEmp[normEmp(p.e)] = p; });
+  const sigOf = p => p ? JSON.stringify([p.k || "", p.s || "", p.dmo || "", p.cpm || "", (p.aw || []).slice().sort()]) : "gone";
+  const saved = await kvGet(env, "state:rolesig", null);
+  const next = Object.assign({}, saved || {});
+  const changed = [];
+  (links.links || []).forEach(l => {
+    const sig = sigOf(byEmp[normEmp(l.emp)]);
+    if (!saved || saved[l.discordId] === undefined) next[l.discordId] = sig;          // new link: /link already synced them
+    else if (saved[l.discordId] !== sig) changed.push({ id: l.discordId, emp: l.emp, sig });
+  });
+  const out = [];
+  for (const c of changed.slice(0, 8)) {
+    if (c.sig === "gone") { next[c.id] = c.sig; continue; }                               // left the roster: roles left alone
+    const r = await syncRolesFor(env, c.id, c.emp, "auto").catch(e => ({ error: e.message }));
+    next[c.id] = c.sig;
+    out.push("#" + c.emp + (r.error ? " (" + r.error + ")" : " +" + (r.added || []).length + "/-" + (r.removed || []).length));
+  }
+  await kvPut(env, "state:rolesig", next);
+  if (!saved) return "remembered " + Object.keys(next).length + " linked members";
+  return out.length ? "synced " + out.join(", ") + (changed.length > 8 ? " (+" + (changed.length - 8) + " next run)" : "") : "";
 }
 
 async function cronEvents(env, now) {
