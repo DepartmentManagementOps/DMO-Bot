@@ -207,7 +207,8 @@ export default {
 
 // What each HQ API call sends back: the top-level fields and the first item's fields.
 async function diagnose(env) {
-  const out = { hqUrl: hqBase(env) ? "set" : "MISSING", kv: env.BOT_KV ? "bound" : "MISSING (BOT_KV)", bridge: linked(env) ? "set" : "MISSING" };
+  const out = { hqUrl: hqBase(env) ? "set" : "MISSING", kv: env.BOT_KV ? "bound" : "MISSING (BOT_KV)", bridge: linked(env) ? "set" : "MISSING",
+    recentRoles: await kvGet(env, "state:lastroles", []) };
   const shape = (v) => Array.isArray(v) ? { list: v.length, first: v[0] && typeof v[0] === "object" ? Object.keys(v[0]) : v[0] }
     : v && typeof v === "object" ? Object.keys(v).reduce((m, k) => (m[k] = Array.isArray(v[k]) ? { list: v[k].length, first: v[k][0] && typeof v[k][0] === "object" ? Object.keys(v[k][0]) : v[k][0] } : typeof v[k] === "object" && v[k] ? Object.keys(v[k]) : typeof v[k], m), {}) : typeof v;
   for (const api of ["events", "home", "hqroster", "market"]) {
@@ -875,9 +876,18 @@ async function syncRequest(env, b) {
   if (row) await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
   // Approved roster / award request: give that person their roles straight away.
   if (b.status === "Done" && (type === "roster" || type === "award") && CONFIG.GUILD_ID) {
-    const r = await rolesAfterRequest(env, path, b).catch(e => ({ error: e.message }));
-    if (r && !r.error && (r.added.length || r.removed.length)) dmText += "\n🎭 Your Discord roles have been updated to match the roster.";
+    // Straight to the person who sent it, through their link (the roster links a new member just before
+    // it says "Done"); else worked out from the request message.
+    let r = null;
+    if (b.submittedById) {
+      const l = await bridge(env, { action: "links", discordId: String(b.submittedById) }).catch(() => null);
+      const emp = l && l.ok && (l.links || [])[0] && l.links[0].emp;
+      if (emp) { ROSTER = null; r = await syncRolesFor(env, String(b.submittedById), emp, "link").catch(e => ({ error: e.message })); }
+    }
+    if (!r || r.error) r = await rolesAfterRequest(env, path, b).catch(e => ({ error: e.message }));
+    if (r && !r.error && ((r.added || []).length || (r.removed || []).length)) dmText += "\n🎭 Your Discord roles have been updated to match the roster.";
     if (r && !r.error) await markRequestRoles(env, b.id, "done");
+    await noteRoles(env, b.id + " (approved)", b.submittedById, r);
     if (r && r.error) console.warn("Roles after " + b.id + ": " + r.error);
   }
   if (dmText && b.submittedById) await dm(env, b.submittedById, { embeds: [{ author: { name: CONFIG.NAME }, color: colour, description: dmText, timestamp: new Date().toISOString() }] });
@@ -2451,6 +2461,14 @@ async function cronRoleChanges(env, now) {
 
 // Approved roster / award requests whose roles weren't given yet (if the roster's "Done" message didn't get
 // through): links new members, then gives the roles. Each request is tried up to 3 times.
+// The last 15 role attempts after approvals (shown in /diag as recentRoles).
+async function noteRoles(env, what, userId, r) {
+  if (!env.BOT_KV) return;
+  const list = await kvGet(env, "state:lastroles", []) || [];
+  list.unshift({ at: new Date().toISOString(), what, user: String(userId || ""),
+    result: !r ? "nothing done" : r.error ? "ERROR: " + r.error : "added " + (r.added || []).length + ", removed " + (r.removed || []).length + ((r.failed || []).length ? ", " + r.failed.length + " not allowed" : "") });
+  await kvPut(env, "state:lastroles", list.slice(0, 15));
+}
 async function markRequestRoles(env, id, how) {
   const st = await kvGet(env, "state:reqroles", {}) || {};
   st[id] = how; await kvPut(env, "state:reqroles", st, 4 * 86400);
@@ -2476,6 +2494,7 @@ async function cronRequestRoles(env, now) {
     if (!r.error || r.error === "not in the server") st[x.id] = "done";
     else st[x.id] = tries >= 3 ? "gave up" : tries;
     out.push(x.id + ": " + (r.error ? r.error : "roles +" + (r.added || []).length + "/-" + (r.removed || []).length));
+    await noteRoles(env, x.id + " (5-minute check)", x.discordId, r);
   }
   await kvPut(env, "state:reqroles", st, 4 * 86400);
   return out.join(", ");
