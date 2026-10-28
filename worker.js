@@ -106,7 +106,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/cron") {
       if (!env.REGISTER_KEY || url.searchParams.get("key") !== env.REGISTER_KEY) return new Response("Wrong key", { status: 403 });
       const log = await runCron(env, Date.now());
-      return new Response(log.length ? log.join("\n") : "Ran — nothing to do.");
+      return new Response(log.length ? log.join("\n") : "Ran. Nothing to do.");
     }
 
     // What the HQ API sends back (field names), for checking: /diag?key=REGISTER_KEY
@@ -195,7 +195,7 @@ export default {
     } catch (e) {
       console.error(e && e.stack || e);
       if (i.type === T.AUTOCOMPLETE) return json({ type: R.AUTOCOMPLETE, data: { choices: [] } });
-      return json(reply("Something went wrong: " + (e && e.message || e)));
+      return json(reply("Error: " + (e && e.message || e)));
     }
   },
 
@@ -217,7 +217,7 @@ async function diagnose(env) {
   try {
     const roster = await loadRoster(env);
     const someone = roster && roster.list.find(p => p.e);
-    out.profile = someone ? shape(await hq(env, "profile", { emp: someone.e }, true)) : "no employee numbers in the bridge's names list (update the bridge)";
+    out.profile = someone ? shape(await hq(env, "profile", { emp: someone.e }, true)) : "no employee numbers in the roster's names list";
   } catch (e) { out.profile = "ERROR: " + e.message; }
   // Which server roles role sync will manage (matched by name to the roster).
   if (CONFIG.GUILD_ID) {
@@ -230,7 +230,7 @@ async function diagnose(env) {
       const linked = ((links && links.links) || []).map(l => ({ discordId: l.discordId, emp: l.emp,
         onRoster: !!byEmp[normEmp(l.emp)], rank: byEmp[normEmp(l.emp)] ? String(pick(byEmp[normEmp(l.emp)], ["rank"], "")) : "",
         awards: byEmp[normEmp(l.emp)] ? byEmp[normEmp(l.emp)].awards || "none read" : "" }));
-      out.roles = { source: ROLE_SOURCE, awardsOnRoster: AWARD_NAMES.length ? AWARD_NAMES : "NONE — no awards came back from the roster", linked: linked.slice(0, 15), managed: Object.keys(plan.managed).map(id => plan.managed[id].name),
+      out.roles = { source: ROLE_SOURCE, awardsOnRoster: AWARD_NAMES.length ? AWARD_NAMES : "none (the roster sent no awards)", linked: linked.slice(0, 15), managed: Object.keys(plan.managed).map(id => plan.managed[id].name),
         aboveTheBot: plan.tooHigh, sameNameIgnored: plan.duplicates, botRole: plan.botRole, botFound: plan.botFound, serverRoles: plan.serverRoles,
         rosterRanks: Object.keys(ranks).sort() };
     } catch (e) { out.roles = "ERROR: " + e.message; }
@@ -386,7 +386,7 @@ async function handle(i, env, ctx) {
     const att = ((i.data.resolved || {}).attachments || {})[(v.proof || [])[0]];
     const st = readPanel(i.message);
     const update = type === "roster" && st.mode === "update";
-    if (!att && !update) return reply("No proof came through — press **Add proof & send** again and attach a screenshot.");
+    if (!att && !update) return reply("No proof was attached. Press **Add proof & send** again and attach a screenshot.");
     if (att && !isAllowedImage(att)) return reply(IMAGE_RULE);
     Object.keys(v).forEach(k => { if (k !== "proof") st[k] = k === "notes" ? String(v[k] || "").trim().slice(0, 300) : cleanLine(v[k], 100); });
     ctx.waitUntil(sendRequest(env, i, type, st, att));
@@ -405,7 +405,7 @@ async function handle(i, env, ctx) {
     const action = i.data.custom_id.slice(2);
     const draft = readDraft(i.message);
 
-    if (action === "cancel") return { type: R.UPDATE, data: { content: "", embeds: [{ color: CONFIG.COLOURS.denied, description: "✖️ **Event log cancelled** — nothing was sent." }], components: [] } };
+    if (action === "cancel") return { type: R.UPDATE, data: { content: "", embeds: [{ color: CONFIG.COLOURS.denied, description: "Event log cancelled. Nothing was sent." }], components: [] } };
 
     if (action === "host" || action === "sup" || action === "co" || action === "att") {
       ctx.waitUntil(pickMembers(env, i, draft, action));
@@ -417,7 +417,7 @@ async function handle(i, env, ctx) {
         custom_id: "d:details", title: "Event details",
         components: [
           row(input("date", "Date", 1, true, 40, "e.g. 28/09/2026", draft.date || today())),
-          row(input("notes", "Notes", 2, true, 500, "How it went, anything the approvers should know", draft.notes))
+          row(input("notes", "Notes", 2, true, 500, "Anything the approvers should know", draft.notes))
         ]
       } };
     }
@@ -425,14 +425,14 @@ async function handle(i, env, ctx) {
     if (action === "proof") {
       return { type: R.MODAL, data: {
         custom_id: "d:proof", title: "Proof screenshot",
-        components: [{ type: 18, label: "Screenshot of the event", description: "PNG, JPG or WebP. It's sent to Google to help check it; a person always decides.",
+        components: [{ type: 18, label: "Screenshot of the event", description: "PNG, JPG or WebP. Shared with Google for an automated check; staff make the decision.",
           component: { type: 19, custom_id: "file", min_values: 1, max_values: 1, required: true } }]
       } };
     }
 
     if (action === "submit") {
       const missing = missingParts(draft);
-      if (missing.length) return reply("📋 Almost there — still needed: **" + missing.join("**, **") + "**.");
+      if (missing.length) return reply("Still needed: " + missing.join(", ") + ".");
       ctx.waitUntil(submit(env, i, draft, who));
       return { type: R.DEFER_UPDATE };
     }
@@ -451,7 +451,7 @@ async function handle(i, env, ctx) {
     const draft = readDraft(i.message);
     const idList = modalValues(i).file || [];
     const att = ((i.data.resolved || {}).attachments || {})[idList[0]];
-    if (!att) return reply("No file came through — try again.");
+    if (!att) return reply("No file was attached. Try again.");
     if (!isAllowedImage(att)) return reply(IMAGE_RULE);
     draft.proof = att.url;
     draft.proofName = safeName(att.filename);
@@ -462,7 +462,7 @@ async function handle(i, env, ctx) {
 
   // Buttons on older #approval-logs messages: approvals now happen on the roster.
   if (i.type === T.COMPONENT && /^(approve|deny):/.test(i.data.custom_id)) {
-    return reply("This is an old message — approve or deny it on the roster's **Approvals** page.");
+    return reply("This message is out of date. Approve or deny it on the roster's Approvals page.");
   }
 
   return reply("Unknown action.");
@@ -499,7 +499,7 @@ const REQUESTS = {
     format: ["roblox", "discord", "award", "proof", "ping"]
   },
   loa: {
-    command: "loa", description: "Request a leave of absence (LOA) — Management+ only", title: "LOA Request", icon: "🏖️",
+    command: "loa", description: "Request a leave of absence (Management+ only)", title: "LOA Request", icon: "🏖️",
     options: [
       { type: 3, name: "start", description: "First day of the LOA (DD/MM/YYYY)", required: true, min_length: 8, max_length: 10 },
       { type: 3, name: "end", description: "Last day of the LOA (DD/MM/YYYY)", required: true, min_length: 8, max_length: 10 },
@@ -515,7 +515,7 @@ const REQUESTS = {
 // ---- The panels (state lives in the panel's own embed fields, like /event log) ----
 const PANEL_FIELDS = { "Roblox Username": "roblox", "Discord Username": "discord", "Award Requested": "award",
   "Rank": "rank", "Referred by": "ref", "Timezone (UTC)": "tz" };
-const NOT_SET = ["Not chosen yet", "Not found on the roster — add it when you send", "None"];
+const NOT_SET = ["Not chosen yet", "Not on the roster. Enter it when you send.", "None", "Not found on the roster — add it when you send"];   // last: older panels
 
 function readPanel(message) {
   const st = {};
@@ -553,21 +553,21 @@ function awardLists(meta) {
 
 function awardPanel(st, meta) {
   const lists = awardLists(meta).slice(0, 4);           // 4 dropdowns + the button row
-  const rows = lists.map((l, n) => selectRow("aw:pick:" + n, l.title + " — choose one",
+  const rows = lists.map((l, n) => selectRow("aw:pick:" + n, l.title + ": choose one",
     l.items.map(a => ({ label: a.label, value: a.label, description: a.description })), st.award, true));
   rows.push({ type: 1, components: [
     { type: 2, style: 3, label: "Add proof & send", custom_id: "aw:send", emoji: { name: "📎" }, disabled: !st.award },
     { type: 2, style: 2, label: "Cancel", custom_id: "aw:cancel" }] });
   return { content: "", embeds: [{
-    author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "🏅 Award Request",
+    author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "Award Request",
     description: lists.length
       ? "Choose the award you're requesting from the lists below, then press **Add proof & send**."
-      : "⚠️ Couldn't load the awards from the roster" + (st.metaError ? " (" + String(st.metaError).slice(0, 150) + ")" : "") + " — press **Add proof & send** and type it in.",
+      : "Couldn't load the award list from the roster" + (st.metaError ? " (" + String(st.metaError).slice(0, 150) + ")" : "") + ". Press **Add proof & send** and type the award name.",
     fields: [
       { name: "Roblox Username", value: st.roblox || NOT_SET[1], inline: true },
       { name: "Discord Username", value: st.discord || "—", inline: true },
       { name: "Award Requested", value: st.award ? "**" + st.award + "**" : NOT_SET[0], inline: false }],
-    footer: { text: "🔒 Only you can see this" } }], components: lists.length ? rows : [rows[rows.length - 1]] };
+    footer: { text: "Only you can see this" } }], components: lists.length ? rows : [rows[rows.length - 1]] };
 }
 
 function mrList(roster) {
@@ -591,13 +591,13 @@ function updateRanks(meta, me) {
 function rosterUpdatePanel(st, meta, me) {
   const rows = [];
   const ranks = updateRanks(meta, me);
-  if (ranks.length) rows.push(selectRow("ro:rank", "Rank — keep yours, or choose the one you're moving to",
+  if (ranks.length) rows.push(selectRow("ro:rank", "Rank: keep yours or choose your new rank",
     ranks.slice(0, 25).map(r => ({ label: r, value: r, description: r === me.k ? "Your current rank" : undefined })), st.rank, false));
   rows.push({ type: 1, components: [
     { type: 2, style: 3, label: "Changes & proof", custom_id: "ro:send", emoji: { name: "📎" } },
     { type: 2, style: 2, label: "Cancel", custom_id: "ro:cancel" }] });
   return { content: "", embeds: [{
-    author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "🧾 " + REQUESTS.roster.updateTitle,
+    author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: REQUESTS.roster.updateTitle,
     description: `You're already on the roster as **${me.r || me.d}** (${me.k || "no rank"}${me.s ? ", " + me.s : ""}).\n` +
       "Choose a new **rank** if it's changing, then press **Changes & proof** to change your Roblox username or timezone. " +
       "Staff approve it on the roster before anything changes.",
@@ -606,37 +606,37 @@ function rosterUpdatePanel(st, meta, me) {
       { name: "Roblox Username", value: st.roblox || "—", inline: true },
       { name: "Timezone (UTC)", value: st.tz || "—", inline: true },
       { name: "Rank", value: st.rank ? "**" + st.rank + "**" : NOT_SET[0], inline: true }],
-    footer: { text: "🔒 Only you can see this" } }], components: rows.slice(0, 5) };
+    footer: { text: "Only you can see this" } }], components: rows.slice(0, 5) };
 }
 
 function rosterPanel(st, meta, roster) {
   const rows = [];
   const ranks = meta && meta.ranks || [];
-  if (ranks.length) rows.push(selectRow("ro:rank", "Rank — choose the rank you're requesting",
+  if (ranks.length) rows.push(selectRow("ro:rank", "Rank you're applying for",
     ranks.slice(0, 25).map(r => ({ label: r, value: r })), st.rank, false));
   // Referred by: MR+ only (they get Market points). Up to 3 lists of 25, else a member search.
   const mr = mrList(roster);
-  const opts = [{ label: "None — nobody referred me", value: "__none__" }].concat(
+  const opts = [{ label: "None (nobody referred me)", value: "__none__" }].concat(
     mr.map(p => ({ label: p.r || p.d, value: p.r || p.d, description: p.k })));
   if (mr.length && opts.length <= 75) {
     for (let k = 0; k < opts.length; k += 25) {
       const part = opts.length > 25 ? ` (${k / 25 + 1}/${Math.ceil(opts.length / 25)})` : "";
-      rows.push(selectRow("ro:ref:" + (k / 25), "Referred by" + part + " — MR members only", opts.slice(k, k + 25), st.ref || (st.refNone ? "__none__" : ""), true));
+      rows.push(selectRow("ro:ref:" + (k / 25), "Referred by" + part + " (MR members only)", opts.slice(k, k + 25), st.ref || (st.refNone ? "__none__" : ""), true));
     }
   } else {
-    rows.push({ type: 1, components: [{ type: 5, custom_id: "ro:refuser", placeholder: "Referred by — search for the MR member (leave empty if nobody)", min_values: 0, max_values: 1 }] });
+    rows.push({ type: 1, components: [{ type: 5, custom_id: "ro:refuser", placeholder: "Referred by: search for the MR member, or leave empty", min_values: 0, max_values: 1 }] });
   }
   rows.push({ type: 1, components: [
     { type: 2, style: 3, label: "Details & proof", custom_id: "ro:send", emoji: { name: "📎" }, disabled: ranks.length > 0 && !st.rank },
     { type: 2, style: 2, label: "Cancel", custom_id: "ro:cancel" }] });
   return { content: "", embeds: [{
-    author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "🧾 Role & Roster Request",
-    description: "Choose your **rank** and who **referred** you (MR members only — they get Market points for it), then press **Details & proof**.",
+    author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "Role & Roster Request",
+    description: "Choose your rank and who referred you (MR members only; they receive Market points), then press **Details & proof**.",
     fields: [
       { name: "Discord Username", value: st.discord || "—", inline: true },
       { name: "Rank", value: st.rank ? "**" + st.rank + "**" : NOT_SET[0], inline: true },
       { name: "Referred by", value: st.ref ? "**" + st.ref + "**" : "None", inline: true }],
-    footer: { text: "🔒 Only you can see this" } }], components: rows.slice(0, 5) };
+    footer: { text: "Only you can see this" } }], components: rows.slice(0, 5) };
 }
 
 async function openRequestPanel(env, i, type, opts) {
@@ -652,7 +652,7 @@ async function openRequestPanel(env, i, type, opts) {
     if (type === "roster" && opts && opts.updateOnly && !me) {
       return editReply(env, i, roster
         ? `You aren't on the roster under your Discord name (**${u.username}**). New members apply with **/roster start**, then **/roster submit**.`
-        : "Couldn't reach the roster — try again in a minute.");
+        : "Couldn't reach the roster. Try again in a minute.");
     }
     const st = { discord: u.username || "", roblox: me ? (me.r || me.d) : "" };
     if (type === "roster" && me) {
@@ -672,14 +672,14 @@ function requestPanelAction(env, ctx, i) {
   const id = i.data.custom_id;
   const type = id.startsWith("aw") ? "award" : "roster";
   const st = readPanel(i.message);
-  if (/:cancel$/.test(id)) return { type: R.UPDATE, data: { content: "", embeds: [{ color: CONFIG.COLOURS.denied, description: "✖️ **" + REQUESTS[type].title + " cancelled** — nothing was sent." }], components: [] } };
+  if (/:cancel$/.test(id)) return { type: R.UPDATE, data: { content: "", embeds: [{ color: CONFIG.COLOURS.denied, description: REQUESTS[type].title + " cancelled. Nothing was sent." }], components: [] } };
 
   // "Add proof & send" / "Details & proof": the last form, names filled in.
   if (/:send$/.test(id)) {
     const box = (cid, label, value, max, placeholder, required) => ({ type: 18, label: label, component: Object.assign(
       { type: 4, custom_id: cid, style: 1, required: required !== false, max_length: max, placeholder: placeholder },
       value ? { value: String(value).slice(0, max) } : {}) });
-    const proof = (desc) => ({ type: 18, label: "Proof", description: (desc + " Sent to Google to help check it.").slice(0, 100), component: { type: 19, custom_id: "proof", min_values: 1, max_values: 1, required: true } });
+    const proof = (desc) => ({ type: 18, label: "Proof", description: (desc + " Shared with Google for an automated check.").slice(0, 100), component: { type: 19, custom_id: "proof", min_values: 1, max_values: 1, required: true } });
     const update = type === "roster" && st.mode === "update";
     const hasRank = i.message.components.some(r => (r.components || []).some(c => c.custom_id === "ro:rank"));
     if (update) {
@@ -687,7 +687,7 @@ function requestPanelAction(env, ctx, i) {
       const comps = [box("roblox", "Roblox Username", st.roblox, 40, "Change it here if your Roblox username changed"),
         box("tz", "Timezone (UTC)", st.tz, 12, "e.g. UTC+1")]
         .concat(hasRank ? [] : [box("rank", "Rank", st.rank, 60, "The rank you're moving to (or your current one)")])
-        .concat([long("notes", "Notes", 300, "Why it's changing, e.g. promoted in-game — optional"),
+        .concat([long("notes", "Notes", 300, "Optional: why it's changing, e.g. promoted in game"),
           { type: 18, label: "Proof", description: "Screenshot for a rank change (optional for name / timezone changes)", component: { type: 19, custom_id: "proof", min_values: 0, max_values: 1, required: false } }]);
       return { type: R.MODAL, data: { custom_id: "ro:send", title: REQUESTS.roster.updateTitle, components: comps } };
     }
@@ -747,7 +747,7 @@ function requestText(type, st, submitter) {
     else if (key === "roblox") lines.push(`Roblox Username: ${show(st.roblox)}`);
     else if (key === "proof") {
       if (st.code) lines.push(`Verification code: ${st.code}` + (st.codeAlt ? ` (or ${st.codeAlt} if it was made yesterday)` : "") +
-        (st.robloxChecked ? " · Roblox account ✓" : ""));
+        (st.robloxChecked ? " · Roblox account verified" : ""));
       lines.push("Proof:");
     }
     else if (key === "ping") lines.push(`Ping: <@&${CONFIG.DMO_ROLE_ID}>`);
@@ -784,7 +784,7 @@ async function sendRequest(env, i, type, st, att) {
     const u = (i.member && i.member.user) || i.user || {};
     const check = await checkRequest(env, i, type, st);       // also tidies names to their roster spelling
     if (check.problems.length) {
-      const embed = { color: CONFIG.COLOURS.denied, author: { name: CONFIG.NAME }, title: "❌ " + t.title + " not sent",
+      const embed = { color: CONFIG.COLOURS.denied, author: { name: CONFIG.NAME }, title: t.title + " not sent",
         description: check.problems.map(p => "• " + p).join("\n").slice(0, 3800) + "\n\nRun **" + (st.code ? "/roster submit" : "/" + t.command) + "** again." };
       if (fromPanel) await finish(embed); else await editOriginal(env, i, { embeds: [embed], allowed_mentions: NO_PINGS });
       return;
@@ -812,15 +812,15 @@ async function sendRequest(env, i, type, st, att) {
         submittedBy: (i.member && i.member.nick) || u.global_name || u.username, submittedById: u.id,
         proof: `https://discord.com/channels/${i.guild_id}/${channel}/${msg.id}`
       }, proof ? { proofName: proof.name, proofType: proof.type, proofData: base64(proof.data) } : {})).catch(e => ({ ok: false, error: e.message }));
-      note = q.ok ? "\nIt's also on the roster's **Approvals** page — you'll get a DM when it's decided."
-                  : `\n⚠️ It couldn't be added to the roster's Approvals page (${q.error}). Let a staff member know.`;
+      note = q.ok ? "\nYou'll get a DM when it has been decided."
+                  : `\nIt couldn't be added to the roster's Approvals page (${q.error}). Please let a staff member know.`;
     }
-    const done = { color: CONFIG.COLOURS.approved, author: { name: CONFIG.NAME }, title: "✅ " + title + " sent",
+    const done = { color: CONFIG.COLOURS.approved, author: { name: CONFIG.NAME }, title: title + " sent",
       description: `It's in <#${channel}> for staff to review. [Open it](https://discord.com/channels/${i.guild_id}/${channel}/${msg.id})` + note,
       timestamp: new Date().toISOString() };
     if (fromPanel) await finish(done); else await editOriginal(env, i, { embeds: [done], allowed_mentions: NO_PINGS });
   } catch (e) {
-    await editOriginal(env, i, { content: "❌ **Couldn't send your " + t.title + ":** " + e.message, allowed_mentions: NO_PINGS }).catch(() => {});
+    await editOriginal(env, i, { content: "Couldn't send your " + t.title + ": " + e.message, allowed_mentions: NO_PINGS }).catch(() => {});
   }
 }
 
@@ -853,23 +853,23 @@ async function syncRequest(env, b) {
   let row = null, dmText = null, colour = CONFIG.COLOURS.approved;
   if (b.status === "Claimed") row = claimedRow(type, "web", `${b.by || "someone"} (roster)`);
   if (b.status === "Released") row = decisionRow(type);
-  if (b.status === "Approved") row = statusRow(`Approved by ${who} — adding to the roster…`, "⏳");
+  if (b.status === "Approved") row = statusRow(`Approved by ${who}. Adding to the roster…`, "⏳");
   if (b.status === "Done") {
     row = statusRow(`Approved by ${who}`, "✅");
-    dmText = `✅ **Your ${t.title} was approved** by ${who}.` + (b.note ? `\n-# ${String(b.note).slice(0, 300)}` : "");
+    dmText = `Your ${t.title} was approved by ${who}.` + (b.note ? `\n-# ${String(b.note).slice(0, 300)}` : "");
   }
-  if (b.status === "Error") row = statusRow(`Approved — not added to the roster yet (${String(b.note || "error").slice(0, 30)})`, "⚠️");
+  if (b.status === "Error") row = statusRow(`Approved, but not added to the roster yet (${String(b.note || "error").slice(0, 30)})`, "⚠️");
   if (b.status === "Denied") {
     row = statusRow(`Denied by ${who}`, "✖️");
     colour = CONFIG.COLOURS.denied;
-    dmText = `✖️ **Your ${t.title} was denied** by ${who}.\n**Reason:** ${String(b.reason || "No reason given").slice(0, 900)}`;
+    dmText = `Your ${t.title} was denied by ${who}.\n**Reason:** ${String(b.reason || "No reason given").slice(0, 900)}`;
     // An application: their code stays valid (48 hours from now), so they can fix it and send it again.
     if (type === "roster" && b.submittedById && env.BOT_KV) {
       const c = await kvGet(env, "code:" + b.submittedById, null);
       if (c && c.code) {
         c.at = Date.now();                               // counted from now
         await kvPut(env, "code:" + b.submittedById, c, 48 * 3600);
-        dmText += `\n\nYour code **${c.code}** still works for the next 48 hours — fix what's needed and run **/roster submit** again (no need for /roster start).`;
+        dmText += `\n\nYour code **${c.code}** is valid for another 48 hours. Make the changes needed and run **/roster submit** again; you don't need a new code.`;
       }
     }
   }
@@ -891,14 +891,14 @@ async function syncRequest(env, b) {
       if (emp) { ROSTER = null; r = await syncRolesFor(env, String(b.submittedById), emp, "link").catch(e => ({ error: e.message })); }
     }
     if (!r || r.error) r = await rolesAfterRequest(env, path, b).catch(e => ({ error: e.message }));
-    if (r && !r.error && ((r.added || []).length || (r.removed || []).length)) dmText += "\n🎭 Your Discord roles have been updated to match the roster.";
+    if (r && !r.error && ((r.added || []).length || (r.removed || []).length)) dmText += "\nYour Discord roles have been updated.";
     if (r && !r.error) await markRequestRoles(env, b.id, "done");
     await noteRoles(env, b.id + " (approved)", b.submittedById, r);
     if (r && r.error) console.warn("Roles after " + b.id + ": " + r.error);
     // The message says how the roles went, so staff can see it without /diag.
     const failed = r && !r.error && (r.failed || []).length;
     row = r && !r.error
-      ? statusRow(`Approved by ${who} · roles given` + (failed ? ` (${failed} not allowed — move the bot's role higher)` : ""), failed ? "⚠️" : "✅")
+      ? statusRow(`Approved by ${who} · roles given` + (failed ? ` (${failed} blocked: the bot's role is too low)` : ""), failed ? "⚠️" : "✅")
       : statusRow(`Approved by ${who} · roles not given: ${String((r && r.error) || "unknown").slice(0, 40)}`, "⚠️");
     await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
   }
@@ -1008,8 +1008,8 @@ async function loggerOf(env, roster, i) {
 }
 // Event logs: Middle Management (rank 06) and above only. Text for refusing, or "" when they may.
 function cantLog(p) {
-  if (p === false) return "🚫 Only **Middle Management and above** can log events, and you aren't on the roster under your Discord name. If you're on it under another name, ask DMO to link you with **/link**.";
-  if (p && (p.s || p.k) && !isMrPlus(p)) return `🚫 Only **Middle Management and above** (rank 06+) can log events — you're **${p.k || p.s}**.`;
+  if (p === false) return "Only Middle Management and above can log events, and you aren't on the roster under your Discord name. If your roster entry has a different Discord name, ask DMO to correct it, then run **/link**.";
+  if (p && (p.s || p.k) && !isMrPlus(p)) return `Only Middle Management and above (rank 06+) can log events. Your rank is ${p.k || p.s}.`;
   return "";
 }
 function rankNumber(rank) { const m = String(rank || "").match(/^\s*(\d+)/); return m ? Number(m[1]) : 0; }
@@ -1028,11 +1028,11 @@ async function checkRequest(env, i, type, st) {
   if (type === "loa") { st.discord = ""; st.roblox = me ? (me.r || me.d) : ""; }
 
   if (!roster && type === "roster" && st.mode === "update") {
-    out.problems.push("Couldn't reach the roster to see what's changing — try again in a minute.");
+    out.problems.push("Couldn't reach the roster to check your changes. Try again in a minute.");
     return out;
   }
   if (!roster) {
-    out.warning = "Couldn't reach the roster to check this request" + (type === "loa" ? " — please confirm they're MR+." : ".");
+    out.warning = "Couldn't reach the roster to check this request" + (type === "loa" ? ". Please confirm they're MR+." : ".");
     return out;
   }
 
@@ -1073,14 +1073,14 @@ async function checkRequest(env, i, type, st) {
     if (typed && typed !== st.current.rank) {
       const list = updateRanks(meta, me), n = rankNumber(typed);
       const hit = list.find(r => r.toLowerCase() === typed.toLowerCase()) || (n ? list.find(r => rankNumber(r) === n) : null);
-      if (n >= 14) out.problems.push("**Rank:** ranks 14 and 15 are Department Leadership — they're appointed, not requested.");
+      if (n >= 14) out.problems.push("**Rank:** ranks 14 and 15 are Department Leadership positions, which are appointed rather than requested.");
       else if (!list.length) changes.rank = { from: st.current.rank, to: typed };
       else if (!hit) out.problems.push(`**Rank:** "${typed}" isn't a rank on the roster. Choose one of: ${list.join(", ")}.`);
       else if (hit !== st.current.rank) changes.rank = { from: st.current.rank, to: hit };
     }
     st.changes = changes;
     if (!out.problems.length && !Object.keys(changes).length) {
-      out.problems.push(`Nothing's changed — you're already on the roster as **${me.r || me.d}**, ${me.k || "no rank"}` +
+      out.problems.push(`Nothing has changed: you're already on the roster as **${me.r || me.d}**, ${me.k || "no rank"}` +
         (me.z ? `, ${me.z}` : "") + ". Choose a different rank, or change your Roblox username or timezone.");
     }
   }
@@ -1091,7 +1091,7 @@ async function checkRequest(env, i, type, st) {
     if (st.ref) {
       const p = onRoster(st.ref);
       if (!p) out.problems.push(`**Referred by:** ${st.ref} isn't on the roster. Only MR members can be put as a referrer.`);
-      else if (!isMrPlus(p)) out.problems.push(`**Referred by:** ${p.r || p.d} is **${p.k}** — only MR members can be put as a referrer (they get Market points for it).`);
+      else if (!isMrPlus(p)) out.problems.push(`**Referred by:** ${p.r || p.d} is **${p.k}**. Only MR members can be referrers.`);
       else { st.ref = p.r || p.d; st.refDiscord = p.d || ""; }
     }
     if (meta && meta.ranks.length) {
@@ -1103,8 +1103,8 @@ async function checkRequest(env, i, type, st) {
   }
 
   if (type === "loa") {
-    if (!me) out.problems.push("LOA requests are for **MR+ only**, and you aren't on the roster under your Discord name.");
-    else if (!isMrPlus(me)) out.problems.push(`LOA requests are for **MR+ only** — you're **${me.k}**.`);
+    if (!me) out.problems.push("LOA requests are for MR+ only, and you aren't on the roster under your Discord name.");
+    else if (!isMrPlus(me)) out.problems.push(`LOA requests are for MR+ only. Your rank is ${me.k}.`);
   }
   return out;
 }
@@ -1123,16 +1123,16 @@ function cleanTimezone(s) {
 // /event log: opens the private panel where everything is filled in.
 async function eventLogStart(env, ctx, opts, i) {
   const type = EVENT_TYPES.indexOf(opts.type) !== -1 ? opts.type : "";
-  if (!type) return reply("Choose the event **type** — run **/event log** again and pick one.");
+  if (!type) return reply("Choose an event type: run **/event log** again and pick one.");
   const other = cleanLine(opts.other || "", EVENT_OTHER_MAX);
-  if (type === "Other" && !other) return reply("For **Other**, say what the event was in the **other** box (up to " + EVENT_OTHER_MAX + " characters). Run **/event log** again.");
+  if (type === "Other" && !other) return reply("For Other, describe the event in the **other** box (up to " + EVENT_OTHER_MAX + " characters), then run **/event log** again.");
   // Turned off in the roster's Settings ▸ Events? (checked again when it's sent)
   // The roster is loaded at the same time, to fill in the host as the person logging.
   const within = (p) => Promise.race([p.catch(() => null), new Promise(r => setTimeout(() => r(null), 1500))]);
   const [types, roster] = await Promise.all([within(eventTypes(env)), within(loadRoster(env))]);
   if (!types) ctx.waitUntil(eventTypes(env).catch(() => {}));
   if (!roster) ctx.waitUntil(loadRoster(env).catch(() => {}));
-  if (types && types[type] && !types[type].enabled) return reply(`🚫 **${type}** events are turned off right now.`);
+  if (types && types[type] && !types[type].enabled) return reply(`${type} events are currently turned off.`);
   if (linked(env) && roster) {
     // Kept short: Discord needs the answer within 3 seconds (Submit checks again properly).
     const who = findPerson(roster, i) || await Promise.race([loggerOf(env, roster, i).catch(() => null), new Promise(r => setTimeout(() => r(null), 900))]);
@@ -1203,8 +1203,8 @@ function missingParts(d) {
 }
 
 const P = {
-  event: "🏷️ Type", dap: "⚡ Double AP", date: "📅 Date", host: "🎤 Host", sup: "🛡️ Supervisor", co: "🤝 Co-hosts",
-  picked: "👥 Attendees (picked)", manual: "✏️ Not in the server", notes: "📝 Notes"
+  event: "Type", dap: "Double AP", date: "Date", host: "Host", sup: "Supervisor", co: "Co-hosts",
+  picked: "Attendees (picked)", manual: "Not in the server", notes: "Notes"
 };
 
 function panel(d, roster) {
@@ -1212,8 +1212,8 @@ function panel(d, roster) {
   const flag = (n) => roster && n && !roster.by[n.toLowerCase()] ? `${n} ⚠️` : n;
   const detailsDone = !!(d.date && d.notes);
   const steps = [
-    [detailsDone, "Event details", "📝 **Event details**"],
-    [!!d.proof, "Proof", "📎 **Proof**"],
+    [detailsDone, "Event details", "**Event details**"],
+    [!!d.proof, "Proof", "**Proof**"],
     [!!d.host, "Host", "the **Host** menu"],
     [log.attendees.length > 0, "Attendees", "the **Attendees** menu"]
   ];
@@ -1225,13 +1225,13 @@ function panel(d, roster) {
   const description = [
     `${bar}  **${done} of ${steps.length} required steps done**`,
     steps.map(x => `${x[0] ? "✅" : "⬜"} ${x[1]}`).join("   "),
-    next ? `\n**Next:** use ${next[2]}.` : "\n**Ready** — press **Submit** to send it for approval.",
-    warn ? "⚠️ = not found on the roster, so they won't get points." : ""
+    next ? `\n**Next:** use ${next[2]}.` : "\n**Ready.** Press **Submit** to send it for approval.",
+    warn ? "⚠️ marks names not on the roster. They won't receive points." : ""
   ].filter(Boolean).join("\n");
 
   const fields = [
     { name: P.event, value: d.event || "—", inline: true }
-  ].concat(d.doubleAP ? [{ name: P.dap, value: "Yes — attendees get double", inline: true }] : [], [
+  ].concat(d.doubleAP ? [{ name: P.dap, value: "Yes (attendees get double)", inline: true }] : [], [
     { name: P.date, value: d.date || "—", inline: true },
     { name: P.host, value: d.host ? flag(d.host) : "—", inline: true },
     { name: P.sup, value: d.supervisor ? flag(d.supervisor) : "—", inline: true }
@@ -1250,17 +1250,17 @@ function panel(d, roster) {
     content: "",
     embeds: [Object.assign({
       author: { name: CONFIG.NAME },
-      title: "📋 " + (d.event || "New event log"),
+      title: d.event || "New event log",
       description: description,
       color: done === steps.length ? CONFIG.COLOURS.approved : CONFIG.COLOURS.draft,
       fields: fields,
-      footer: { text: `🔒 Only you can see this · ${log.attendees.length} attendee${log.attendees.length === 1 ? "" : "s"} · proof: ${d.proof ? d.proofName : "none yet"}` }
+      footer: { text: `Only you can see this · ${log.attendees.length} attendee${log.attendees.length === 1 ? "" : "s"} · proof: ${d.proof ? d.proofName : "none yet"}` }
     }, d.proof ? { image: { url: d.proof } } : {})],
     components: [
-      sel("d:host", "🎤 Host (required) — type a name", 1, d.hostIds),
-      sel("d:att", "👥 Attendees (required) — type a name, up to 25", 25, d.pickedIds),
-      sel("d:co", "🤝 Co-hosts (optional)", 10, d.coIds),
-      sel("d:sup", "🛡️ Supervisor (optional)", 1, d.supIds),
+      sel("d:host", "Host (required): type a name", 1, d.hostIds),
+      sel("d:att", "Attendees (required): type a name, up to 25", 25, d.pickedIds),
+      sel("d:co", "Co-hosts (optional)", 10, d.coIds),
+      sel("d:sup", "Supervisor (optional)", 1, d.supIds),
       { type: 1, components: [
         { type: 2, style: detailsDone ? 2 : 1, label: detailsDone ? "Edit details" : "Event details", custom_id: "d:details", emoji: { name: "📝" } },
         { type: 2, style: d.proof ? 2 : 1, label: d.proof ? "Change proof" : "Add proof", custom_id: "d:proof", emoji: { name: "📎" } },
@@ -1272,9 +1272,13 @@ function panel(d, roster) {
   };
 }
 
+// Field names compared without any leading emoji, so older messages (labels with emoji) still read.
+const plainName = (s) => String(s || "").replace(/^[^A-Za-z0-9]+/, "").trim();
+const sameField = (name, label) => plainName(name).startsWith(plainName(label));
+
 function readDraft(message) {
   const e = (message.embeds || [])[0] || {};
-  const f = (prefix) => (e.fields || []).filter(y => y.name.startsWith(prefix)).map(y => y.value).filter(v => v !== "—").join(", ");
+  const f = (prefix) => (e.fields || []).filter(y => sameField(y.name, prefix)).map(y => y.value).filter(v => v !== "—").join(", ");
   const one = (prefix) => f(prefix).replace(/ ⚠️$/, "");
   const list = (v) => !v ? [] : v.split(",").map(s => s.replace(/ ⚠️$/, "").trim()).filter(Boolean);
   const ids = (cid) => {
@@ -1286,7 +1290,7 @@ function readDraft(message) {
   const foot = String((e.footer && e.footer.text) || "");
   const hasProof = !!(e.image && e.image.url);
   return {
-    event: f(P.event) || f("🏷️ Event"), doubleAP: !!f(P.dap), date: f(P.date), notes: (e.fields || []).filter(y => y.name === P.notes).map(y => y.value).filter(v => v !== "—").join(""),
+    event: f(P.event) || f("Event"), doubleAP: !!f(P.dap), date: f(P.date), notes: (e.fields || []).filter(y => plainName(y.name) === plainName(P.notes)).map(y => y.value).filter(v => v !== "—").join(""),
     host: one(P.host), hostIds: ids("d:host"),
     supervisor: one(P.sup), supIds: ids("d:sup"),
     cohosts: list(f(P.co)), coIds: ids("d:co"),
@@ -1336,7 +1340,7 @@ async function submit(env, i, draft, who) {
       const no = cantLog(await loggerOf(env, await loadRoster(env).catch(() => null), i));
       if (no) throw new Error(no.replace(/^🚫 /, ""));
     }
-    await editOriginal(env, i, { content: "⏳ **Sending your event log…**", components: [] });
+    await editOriginal(env, i, { content: "Sending your event log…", components: [] });
 
     let check = null;
     if (linked(env)) {
@@ -1362,37 +1366,37 @@ async function submit(env, i, draft, who) {
         proof: `https://discord.com/channels/${i.guild_id}/${CONFIG.APPROVAL_CHANNEL_ID}/${msg.id}`,
         proofName: proof.name, proofType: proof.type, proofData: base64(proof.data)
       }).catch(e => ({ ok: false, error: e.message }));
-      note = q.ok ? "It's also on the roster's **Approvals** page." : `⚠️ It couldn't be added to the roster's Approvals page (${q.error}).`;
+      note = q.ok ? "It's also on the roster's **Approvals** page." : `It couldn't be added to the roster's Approvals page (${q.error}).`;
     }
     await editOriginal(env, i, {
       content: "",
       embeds: [{
         author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.approved,
-        title: "✅ Sent for approval",
+        title: "Sent for approval",
         description: `**${log.event}** is waiting in <#${CONFIG.APPROVAL_CHANNEL_ID}>.\n` +
           `[Open it](https://discord.com/channels/${i.guild_id}/${CONFIG.APPROVAL_CHANNEL_ID}/${msg.id}) · ${log.attendees.length} attendee${log.attendees.length === 1 ? "" : "s"}\n\n` +
-          `DMO approve it here in Discord or on the roster's **Approvals** page — no points until then. Once approved, the official log is posted in <#${CONFIG.EVENT_LOG_CHANNEL_ID}>. You'll get a DM if it's denied.` + (note && !/^It's also/.test(note) ? "\n" + note : ""),
+          `DMO will review it in Discord or on the roster's Approvals page. Points are added once it's approved, and the official log is posted in <#${CONFIG.EVENT_LOG_CHANNEL_ID}>. You'll get a DM if it's denied.` + (note && !/^It's also/.test(note) ? "\n" + note : ""),
         timestamp: new Date().toISOString()
       }],
       components: []
     });
   } catch (e) {
-    await editOriginal(env, i, Object.assign(panel(draft), { content: "❌ **Couldn't send it:** " + e.message + "\nFix it and press **Submit** again." }))
+    await editOriginal(env, i, Object.assign(panel(draft), { content: "Couldn't send it: " + e.message + "\nFix the problem and press **Submit** again." }))
       .catch(() => followup(env, i, "Couldn't send it: " + e.message));
   }
 }
 
 function rosterCheck(log, check) {
   if (!check) return null;
-  if (check.error) return { name: UI.check, value: "⚠️ Couldn't reach the roster: " + String(check.error).slice(0, 200), inline: false };
+  if (check.error) return { name: UI.check, value: "Couldn't reach the roster: " + String(check.error).slice(0, 200), inline: false };
   const all = uniq([log.host, log.supervisor].filter(Boolean).concat(log.cohosts, log.attendees));
   const missing = all.filter(n => !check[n.toLowerCase()]);
   const hostInfo = check[(log.host || "").toLowerCase()];
   const lines = [];
   if (hostInfo) lines.push(`Host rank: **${hostInfo.rank}** (${hostInfo.sheet})`);
   lines.push(missing.length
-    ? `⚠️ **${missing.length} not on the roster** (no points): ${missing.join(", ")}`.slice(0, 900)
-    : `✅ All ${all.length} people are on the roster`);
+    ? `**${missing.length} not on the roster** (no points): ${missing.join(", ")}`.slice(0, 900)
+    : `All ${all.length} people are on the roster`);
   return { name: UI.check, value: lines.join("\n"), inline: false };
 }
 
@@ -1411,14 +1415,14 @@ async function syncFromRoster(env, b) {
   if (b.status === "Approved" || b.status === "Denied") {
     const approved = b.status === "Approved";
     await discord(env, "PATCH", path, finalMessage(message, log, approved ? "approved" : "denied",
-      `**${who}** (${b.where || "roster page"})`, b.reason, approved ? "⏳ Adding the points to the roster…" : null,
+      `**${who}** (${b.where || "roster page"})`, b.reason, approved ? "Adding points to the roster…" : null,
       (approved ? "Approved by " : "Denied by ") + who));
     if (approved) await postEventLog(env, log, message, `**${who}** (${b.where || "roster page"})`, b.proofUrl);
     else if (b.submittedById) await dm(env, b.submittedById, denialDm(log, who, b.reason));
   } else if (b.status === "Done" || b.status === "Error") {
     const e = Object.assign({}, (message.embeds || [])[0]);
-    const points = b.status === "Done" ? "✅ Points added to the roster" : "⚠️ Points NOT added: " + String(b.note || "").slice(0, 300);
-    e.fields = (e.fields || []).filter(f => f.name !== UI.points).concat([{ name: UI.points, value: points, inline: false }]);
+    const points = b.status === "Done" ? "Points added to the roster" : "Points not added: " + String(b.note || "").slice(0, 300);
+    e.fields = (e.fields || []).filter(f => plainName(f.name) !== plainName(UI.points)).concat([{ name: UI.points, value: points, inline: false }]);
     const kp = keepProof(message);
     if (kp.image) e.image = { url: kp.image };
     await discord(env, "PATCH", path, { embeds: [e], components: message.components || [], attachments: kp.attachments, allowed_mentions: NO_PINGS });
@@ -1433,8 +1437,8 @@ async function syncFromRoster(env, b) {
     }
     if (b.status === "Error") {
       await discord(env, "POST", `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages`, {
-        embeds: [{ color: CONFIG.COLOURS.denied, title: "⚠️ Points not added",
-          description: `**${log.event}** was approved, but the roster couldn't add the points.\n${String(b.note || "").slice(0, 500)}\n\nFix it and press **Retry** on the roster's Approvals page.` }],
+        embeds: [{ color: CONFIG.COLOURS.denied, title: "Points not added",
+          description: `**${log.event}** was approved, but the roster couldn't add the points.\n${String(b.note || "").slice(0, 500)}\n\nFix the issue and press **Retry** on the roster's Approvals page.` }],
         message_reference: { message_id: b.id }, allowed_mentions: NO_PINGS
       });
     }
@@ -1456,12 +1460,12 @@ async function postEventLog(env, log, approvalMessage, approvedBy, driveUrl) {
       await discordFiles(env, "POST", `/channels/${CONFIG.EVENT_LOG_CHANNEL_ID}/messages`, payload, [file]);
     } else {
       // Only if the image really can't be found: say so in small text.
-      payload.content = fitContent(content + "\n-# ⚠️ Proof screenshot couldn't be attached — it's on the roster's Approvals page.", log);
+      payload.content = fitContent(content + "\n-# The proof screenshot couldn't be attached; it's available on the roster's Approvals page.", log);
       await discord(env, "POST", `/channels/${CONFIG.EVENT_LOG_CHANNEL_ID}/messages`, payload);
     }
   } catch (e) {
     await discord(env, "POST", `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages`, {
-      content: `⚠️ **${log.event}** was approved but couldn't be posted to <#${CONFIG.EVENT_LOG_CHANNEL_ID}> (${e.message}).`,
+      content: `**${log.event}** was approved but couldn't be posted to <#${CONFIG.EVENT_LOG_CHANNEL_ID}> (${e.message}).`,
       allowed_mentions: NO_PINGS
     }).catch(() => {});
   }
@@ -1549,15 +1553,15 @@ function profileEmbed(res, avatar, approver) {
 
   // Chips line, like the Find/Edit header
   const chips = [clr && `\`${clr}\``, `**${p.rank || "No rank"}**`, mgmt ? "Management" : "Worker"];
-  if (res.formerTag) chips.push(`🎖️ ${res.formerTag}`);
-  if (p.strikes) chips.push(`⚠️ ${p.strikes} strike${p.strikes > 1 ? "s" : ""}`);
-  if (mgmt && p.loa === "ACTIVE") chips.push("🌴 On LOA");
+  if (res.formerTag) chips.push(res.formerTag);
+  if (p.strikes) chips.push(`${p.strikes} strike${p.strikes > 1 ? "s" : ""}`);
+  if (mgmt && p.loa === "ACTIVE") chips.push("On LOA");
   const dept = [];
   if (res.departments && res.departments.dmo) dept.push(`DMO · ${res.departments.dmo}`);
   if (res.departments && res.departments.cpm) dept.push(`CPM · ${res.departments.cpm}`);
 
   const desc = [chips.filter(Boolean).join("  ·  ")];
-  if (dept.length) desc.push("🏛️ " + dept.join("  ·  "));
+  if (dept.length) desc.push(dept.join("  ·  "));
   if (p.discord && p.roblox) desc.push(`Discord: **${p.discord}**`);
 
   const fields = [
@@ -1566,7 +1570,7 @@ function profileEmbed(res, avatar, approver) {
   ];
   if (mgmt) fields.push({ name: "Hosted", value: String(p.hosted || 0), inline: true }, { name: "Supervised", value: String(p.supervised || 0), inline: true });
   fields.push({ name: "Total events", value: String(p.total || 0), inline: true });
-  if (mgmt) fields.push({ name: "Quota", value: `${p.quota || "—"}${p.quotaTick ? " · ✅ this week" : " · not yet this week"}`, inline: true });
+  if (mgmt) fields.push({ name: "Quota", value: `${p.quota || "—"}${p.quotaTick ? " · met this week" : " · not met this week"}`, inline: true });
   else fields.push({ name: "Activity", value: `${p.status || "—"}${p.lastActive ? "\nLast active " + d(p.lastActive) : ""}`, inline: true });
 
   const m = res.thisMonth || {};
@@ -1582,12 +1586,12 @@ function profileEmbed(res, avatar, approver) {
 
   if (res.stints && res.stints.length) {
     fields.push({ name: `Rank history (${res.stintCount})`, value: res.stints.map(s =>
-      `${s.end ? "▫️" : "🔹"} ${s.rank} — ${s.known ? s.start : "before " + s.start}${s.end ? " → " + s.end : " → now"}`).join("\n").slice(0, 1024), inline: false });
+      `• ${s.rank}: ${s.known ? s.start : "before " + s.start}${s.end ? " to " + s.end : " to now"}`).join("\n").slice(0, 1024), inline: false });
   }
 
   const l = res.loas || { count: 0 };
   fields.push({ name: `LOA history (${l.count})`, value: l.count
-    ? `${l.days} days in total\n` + l.recent.map(x => `${x.status === "Active" ? "🟢" : x.status === "Upcoming" ? "🕒" : "▫️"} ${x.start} – ${x.end} (${x.days}d) · ${x.status}`).join("\n")
+    ? `${l.days} days in total\n` + l.recent.map(x => `${x.start} – ${x.end} (${x.days}d) · ${x.status}`).join("\n")
     : "No LOAs recorded", inline: false });
 
   const aw = res.awards || [];
@@ -1698,8 +1702,8 @@ async function reviewerCheck(env, user, fresh) {
   const res = await bridge(env, { action: "reviewer", discordId: userId, name: userName }).catch(e => ({ ok: false, error: e.message }));
   if (!res.ok) return { ok: false, unknown: true, reason: "Couldn't reach the roster to check you're DMO (" + res.error + ")." };
   const r = { at: Date.now(), ok: !!res.dmo, cpm: !!res.cpm, linked: !!res.linked, name: res.name || "",
-    cpmReason: !res.cpm ? `🔒 Only **CPM** members can decide LOA requests — your Discord name${userName ? ` (**${userName}**)` : ""} isn't in CPM on the roster (a DMO / CPM title on your roster entry).` : "",
-    reason: !res.dmo ? `🔒 Only **DMO** members can do that — your Discord name${userName ? ` (**${userName}**)` : ""} isn't in DMO on the roster (a DMO / CPM title on your roster entry).` : "" };
+    cpmReason: !res.cpm ? `Only CPM members can decide LOA requests. Your Discord name${userName ? ` (**${userName}**)` : ""} doesn't have a CPM title on the roster.` : "",
+    reason: !res.dmo ? `Only DMO members can do that. Your Discord name${userName ? ` (**${userName}**)` : ""} doesn't have a DMO title on the roster.` : "" };
   REVIEWERS[userId] = r;
   await kvPut(env, "rev2:" + userId, r, 600).catch(() => {});
   return r;
@@ -1763,19 +1767,19 @@ const evKey = (e) => e.start + "|" + String(e.title).toLowerCase();
 function eventEmbed(e, heading, colour) {
   const s = ts(e.start);
   const fields = [
-    { name: "🎤 Host", value: e.host || "—", inline: true },
-    { name: "⏱️ Length", value: e.minutes ? fmtMins(e.minutes) : "—", inline: true },
-    { name: "🕒 Starts", value: `<t:${s}:F>\n<t:${s}:R>`, inline: true }
+    { name: "Host", value: e.host || "—", inline: true },
+    { name: "Length", value: e.minutes ? fmtMins(e.minutes) : "—", inline: true },
+    { name: "Starts", value: `<t:${s}:F>\n<t:${s}:R>`, inline: true }
   ];
-  if (e.description) fields.push({ name: "📝 Details", value: e.description.slice(0, 1024), inline: false });
-  return { author: { name: CONFIG.NAME }, color: colour || CONFIG.COLOURS.info, title: "📅 " + e.title,
+  if (e.description) fields.push({ name: "Details", value: e.description.slice(0, 1024), inline: false });
+  return { author: { name: CONFIG.NAME }, color: colour || CONFIG.COLOURS.info, title: e.title,
     description: heading || "", fields: fields, footer: { text: "Times show in your own timezone" } };
 }
 
 async function postEventMessage(env, e, kind, replyTo) {
   if (!CONFIG.EVENTS_CHANNEL_ID) return null;
-  const heading = { new: "**New event scheduled**", r30: "⏰ **Starts in 30 minutes**", r0: "🔔 **Starting now!**",
-                    cancel: "❌ **Cancelled**" }[kind] || "";
+  const heading = { new: "**New event scheduled**", r30: "**Starts in 30 minutes**", r0: "**Starting now**",
+                    cancel: "**Cancelled**" }[kind] || "";
   const ping = CONFIG.EVENT_PING_ROLE_ID && kind !== "cancel" ? `<@&${CONFIG.EVENT_PING_ROLE_ID}>` : "";
   const body = { content: ping, embeds: [eventEmbed(e, heading, kind === "cancel" ? CONFIG.COLOURS.denied : null)],
     allowed_mentions: ping ? { parse: [], roles: [CONFIG.EVENT_PING_ROLE_ID] } : NO_PINGS };
@@ -1823,10 +1827,10 @@ function tzOffsetMinutes(tz) {
 async function canManage(env, i) {
   if ((await reviewerCheck(env, caller(i)).catch(() => ({}))).ok) return { ok: true };
   const roster = await loadRoster(env).catch(() => null);
-  if (!roster) return { ok: false, error: "Couldn't reach the roster to check you're Management+ — try again in a minute." };
+  if (!roster) return { ok: false, error: "Couldn't reach the roster to check your rank. Try again in a minute." };
   const me = findPerson(roster, i);
   if (me && isMrPlus(me)) return { ok: true, me: me };
-  return { ok: false, error: "🔒 That's for **Management+** only" + (me ? ` — you're **${me.k || "not MR+"}** on the roster.` : ", and you aren't on the roster under your Discord name.") };
+  return { ok: false, error: "That's for Management+ only" + (me ? `. Your rank is ${me.k || "below Management"}.` : ", and you aren't on the roster under your Discord name.") };
 }
 
 async function eventSchedule(env, i, o) {
@@ -1837,20 +1841,20 @@ async function eventSchedule(env, i, o) {
     const me = gate.me || (roster ? findPerson(roster, i) : null);
     const tz = o.timezone || (me && me.z) || "UTC+0";
     const when = parseWhen(o.date, o.time, tz);
-    if (when.error) return editReply(env, i, "❌ " + when.error);
-    if (when.ms < Date.now() + 60000) return editReply(env, i, `❌ That's in the past (<t:${ts(when.ms)}:F>). Check the date, time and timezone (${cleanTimezone(tz)}).`);
+    if (when.error) return editReply(env, i, when.error);
+    if (when.ms < Date.now() + 60000) return editReply(env, i, `That's in the past (<t:${ts(when.ms)}:F>). Check the date, time and timezone (${cleanTimezone(tz)}).`);
     const minutes = Math.round(Number(o.length) || 0);
-    if (minutes < 5 || minutes > 720) return editReply(env, i, "❌ Length is in minutes, between 5 and 720.");
+    if (minutes < 5 || minutes > 720) return editReply(env, i, "The length must be between 5 and 720 minutes.");
     let host = cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i));
     const hp = roster && roster.by[host.replace(/^@/, "").toLowerCase()];
-    if (o.host && roster && !hp) return editReply(env, i, `❌ **Host:** ${host} isn't on the roster.`);
+    if (o.host && roster && !hp) return editReply(env, i, `**Host:** ${host} isn't on the roster.`);
     if (hp) host = hp.r || hp.d;
     const e = { start: when.ms, minutes: minutes, title: cleanLine(o.title, 100), host: host, hostEmp: hp ? (hp.e || "") : "",
                 description: String(o.description || "").trim().slice(0, 1000) };
     const u = caller(i);
     const res = await bridge(env, { action: "scheduleEvent", id: "ev-" + i.id, event: e, byId: u.id, byName: u.username || "" })
       .catch(err => ({ ok: false, error: err.message }));
-    if (!res.ok) return editReply(env, i, "❌ Couldn't add it to the HQ events: " + res.error);
+    if (!res.ok) return editReply(env, i, "Couldn't add it to the HQ events: " + res.error);
 
     // Announce it now (the 5-minute check won't announce it again).
     let note = "";
@@ -1859,10 +1863,10 @@ async function eventSchedule(env, i, o) {
       const st = await kvGet(env, "state:events", null);
       if (st) { st.seen[evKey(e)] = Date.now(); if (msg) st.msg[evKey(e)] = msg.id; await kvPut(env, "state:events", st); }
       if (msg) note = `\nAnnounced in <#${CONFIG.EVENTS_CHANNEL_ID}>.`;
-    } catch (err) { note = `\n⚠️ Not announced (${err.message}).`; }
-    await editOriginal(env, i, { content: "✅ **Event scheduled** on the HQ." + note, embeds: [eventEmbed(e, "")], allowed_mentions: NO_PINGS });
+    } catch (err) { note = `\nNot announced (${err.message}).`; }
+    await editOriginal(env, i, { content: "Event scheduled on the HQ." + note, embeds: [eventEmbed(e, "")], allowed_mentions: NO_PINGS });
   } catch (err) {
-    await editReply(env, i, "❌ Couldn't schedule it: " + err.message).catch(() => {});
+    await editReply(env, i, "Couldn't schedule it: " + err.message).catch(() => {});
   }
 }
 
@@ -1872,11 +1876,11 @@ async function eventCancel(env, i, o) {
     if (!gate.ok) return editReply(env, i, gate.error);
     const [startText, ...rest] = String(o.event || "").split("|");
     const start = Number(startText), title = rest.join("|");
-    if (!start || !title) return editReply(env, i, "❌ Pick the event from the list as you type.");
+    if (!start || !title) return editReply(env, i, "Pick the event from the list as you type.");
     const u = caller(i);
     const res = await bridge(env, { action: "cancelEvent", id: "evc-" + i.id, start: start, title: title, byId: u.id, byName: u.username || "" })
       .catch(err => ({ ok: false, error: err.message }));
-    if (!res.ok) return editReply(env, i, "❌ Couldn't cancel it: " + res.error);
+    if (!res.ok) return editReply(env, i, "Couldn't cancel it: " + res.error);
     const e = { start: start, minutes: Number(res.minutes) || 0, title: res.title || title, host: res.host || "", description: "" };
     let note = "";
     try {
@@ -1886,9 +1890,9 @@ async function eventCancel(env, i, o) {
       if (st) { st.cancelled = st.cancelled || {}; st.cancelled[k] = Date.now(); await kvPut(env, "state:events", st); }
       if (msg) note = ` Posted in <#${CONFIG.EVENTS_CHANNEL_ID}>.`;
     } catch (err) { /* the HQ change is what matters */ }
-    await editReply(env, i, `✅ **${e.title}** (<t:${ts(start)}:F>) is cancelled — it's hidden on the HQ.` + note);
+    await editReply(env, i, `**${e.title}** (<t:${ts(start)}:F>) has been cancelled and removed from the HQ.` + note);
   } catch (err) {
-    await editReply(env, i, "❌ Couldn't cancel it: " + err.message).catch(() => {});
+    await editReply(env, i, "Couldn't cancel it: " + err.message).catch(() => {});
   }
 }
 
@@ -1896,9 +1900,9 @@ async function eventList(env, i) {
   try {
     const events = hqEvents(await hq(env, "events")).filter(e => e.start + Math.max(e.minutes, 30) * 60000 > Date.now()).slice(0, 10);
     if (!events.length) return editReply(env, i, "No upcoming events on the HQ right now.");
-    const lines = events.map(e => `**${e.title}** — <t:${ts(e.start)}:F> (<t:${ts(e.start)}:R>)` +
-      `\n-# 🎤 ${e.host || "—"}${e.minutes ? " · ⏱️ " + fmtMins(e.minutes) : ""}`);
-    await editReply(env, i, "", [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: "📅 Upcoming events",
+    const lines = events.map(e => `**${e.title}**, <t:${ts(e.start)}:F> (<t:${ts(e.start)}:R>)` +
+      `\n-# Host: ${e.host || "—"}${e.minutes ? " · Length: " + fmtMins(e.minutes) : ""}`);
+    await editReply(env, i, "", [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: "Upcoming events",
       description: lines.join("\n\n").slice(0, 4000), footer: { text: "Times show in your own timezone" } }]);
   } catch (err) {
     await editReply(env, i, "Couldn't load the events: " + err.message).catch(() => {});
@@ -1972,11 +1976,11 @@ function publicProfileEmbed(data, empHint) {
     total = Object.keys(data.totals).reduce((t, k) => t + (Number(data.totals[k]) || 0), 0);
   }
   if (total === null && typeof p.events === "number") total = p.events;
-  const fields = [{ name: "🎖️ Rank", value: rank, inline: true }, { name: "🪪 Employee #", value: emp ? "#" + emp : "—", inline: true }];
-  if (total !== null && typeof total !== "object") fields.push({ name: "📊 Events (all time)", value: String(total), inline: true });
+  const fields = [{ name: "Rank", value: rank, inline: true }, { name: "Employee #", value: emp ? "#" + emp : "—", inline: true }];
+  if (total !== null && typeof total !== "object") fields.push({ name: "Events (all time)", value: String(total), inline: true });
   if (data.totals && typeof data.totals === "object") {
     const t = describeCounts(data.totals);
-    if (t) fields.push({ name: "📋 All-time breakdown", value: t, inline: false });
+    if (t) fields.push({ name: "All-time breakdown", value: t, inline: false });
   }
 
   // This month: from the profile's monthly events (any of the usual shapes).
@@ -1996,29 +2000,29 @@ function publicProfileEmbed(data, empHint) {
       monthText = ev && typeof ev === "object" ? describeCounts(ev) : (ev !== null ? `${ev} event${Number(ev) === 1 ? "" : "s"}` : describeCounts(cur));
     } else monthText = "No events yet this month";
   }
-  if (monthText) fields.push({ name: "🗓️ This month", value: monthText, inline: false });
+  if (monthText) fields.push({ name: "This month", value: monthText, inline: false });
 
   const jMs = toMs(joined);
   if (jMs) {
     const days = Math.floor((Date.now() - jMs) / 86400000);
-    fields.push({ name: "⏳ Time in the department", value: `${days >= 365 ? (days / 365).toFixed(1) + " years" : days + " days"} · joined <t:${ts(jMs)}:D>`, inline: false });
+    fields.push({ name: "Time in the department", value: `${days >= 365 ? (days / 365).toFixed(1) + " years" : days + " days"} · joined <t:${ts(jMs)}:D>`, inline: false });
   }
   const timeline = hqList(data, ["rankTimeline", "timeline", "ranks"]);
   if (timeline.length) {
     const ordered = timeline.slice().sort((a, b) => toMs(pick(b, ["start", "since", "at", "date"], 0)) - toMs(pick(a, ["start", "since", "at", "date"], 0)));
-    fields.push({ name: "📈 Rank timeline", value: ordered.slice(0, 5).map(r => {
+    fields.push({ name: "Rank timeline", value: ordered.slice(0, 5).map(r => {
       const at = toMs(pick(r, ["start", "since", "at", "date"], 0));
-      return `${r.current ? "🔹" : "▫️"} ${pick(r, ["rank", "name"], "—")}${at ? " — since <t:" + ts(at) + ":D>" : ""}`;
+      return `• ${pick(r, ["rank", "name"], "—")}${at ? ", since <t:" + ts(at) + ":D>" : ""}`;
     }).join("\n").slice(0, 1024), inline: false });
   }
   const awards = hqList(data, ["awards"]).map(a => typeof a === "string" ? a : pick(a, ["label", "name", "title"], "")).filter(Boolean);
-  if (awards.length) fields.push({ name: `🏅 Awards (${awards.length})`, value: awards.join(", ").slice(0, 1024), inline: false });
+  if (awards.length) fields.push({ name: `Awards (${awards.length})`, value: awards.join(", ").slice(0, 1024), inline: false });
   const tags = hqList(data, ["tags", "publicTags"]).map(t => typeof t === "string" ? t : pick(t, ["label", "name"], "")).filter(Boolean);
 
   const link = emp && CONFIG.HQ_PROFILE_URL ? CONFIG.HQ_PROFILE_URL.replace("{emp}", encodeURIComponent(emp)) : "";
   const colour = { EX: 0x1F6B42, HR: 0x6B3FA0, MR: 0xC9A227, LR: 0x7A4A12 }[clr.split(/[^A-Z]/)[0]] || CONFIG.COLOURS.info;
   const embed = { author: { name: CONFIG.NAME }, title: name, color: colour, fields: fields,
-    description: [clr ? "`" + clr + "`" : "", tags.length ? tags.map(t => "🏷️ " + t).join("  ") : "", link ? `[Open HQ profile](${link})` : ""].filter(Boolean).join("  ·  "),
+    description: [clr ? "`" + clr + "`" : "", tags.length ? tags.join(", ") : "", link ? `[Open HQ profile](${link})` : ""].filter(Boolean).join("  ·  "),
     footer: { text: "Public profile · " + CONFIG.NAME } };
   if (link) embed.url = link;
   return embed;
@@ -2037,11 +2041,11 @@ async function leaderboardCommand(env, i) {
   try {
     const res = await bridge(env, { action: "leaderboard" });
     if (!res.ok) return editReply(env, i, "Couldn't reach the roster: " + res.error);
-    const medal = (k) => ["🥇", "🥈", "🥉"][k] || `**${k + 1}.**`;
-    const list = (rows, unit) => rows.length ? rows.map((r, k) => `${medal(k)} ${r.name} — ${r.n} ${unit}${r.n === 1 ? "" : "s"}`).join("\n") : "Nobody yet";
-    await editReply(env, i, "", [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: `🏆 Leaderboard — ${res.month}`,
-      fields: [{ name: "🎤 Top hosts", value: list(res.hosts || [], "event").slice(0, 1024), inline: true },
-               { name: "👥 Top attendees", value: list(res.attendees || [], "event").slice(0, 1024), inline: true }],
+    const medal = (k) => `**${k + 1}.**`;
+    const list = (rows, unit) => rows.length ? rows.map((r, k) => `${medal(k)} ${r.name}: ${r.n} ${unit}${r.n === 1 ? "" : "s"}`).join("\n") : "Nobody yet";
+    await editReply(env, i, "", [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: `Leaderboard: ${res.month}`,
+      fields: [{ name: "Top hosts", value: list(res.hosts || [], "event").slice(0, 1024), inline: true },
+               { name: "Top attendees", value: list(res.attendees || [], "event").slice(0, 1024), inline: true }],
       footer: { text: "Months run from the 1st at 06:00 UTC" } }]);
   } catch (err) {
     await editReply(env, i, "Couldn't load the leaderboard: " + err.message).catch(() => {});
@@ -2058,8 +2062,8 @@ async function myStatsCommand(env, i) {
     if (!r.person) return editReply(env, i, `You aren't on the roster under your Discord name (**${u.username}**). If your roster entry uses a different name, ask to have it updated.`);
     const n = (x) => Number(x) || 0;
     const m = r.month || {}, w = r.week || {};
-    const roleLine = (o) => [["🎤", "Hosted", o.Host], ["🤝", "Co-hosted", o["Co-host"]], ["🛡️", "Supervised", o.Supervisor], ["👥", "Attended", o.Attendee]]
-      .map(([e, label, v]) => `${e} ${label} **${n(v)}**`).join(" · ");
+    const roleLine = (o) => [["Hosted", o.Host], ["Co-hosted", o["Co-host"]], ["Supervised", o.Supervisor], ["Attended", o.Attendee]]
+      .map(([label, v]) => `${label} **${n(v)}**`).join(" · ");
     const types = Object.keys(r.byType || {}).sort((a, b) => {
       const ia = EVENT_TYPES.indexOf(a), ib = EVENT_TYPES.indexOf(b);
       return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
@@ -2068,26 +2072,26 @@ async function myStatsCommand(env, i) {
       const o = r.byType[t];
       const bits = [["hosted", o.Host], ["co-hosted", o["Co-host"]], ["supervised", o.Supervisor], ["attended", o.Attendee]]
         .filter(([, v]) => n(v)).map(([label, v]) => `${n(v)} ${label}`);
-      return `**${t}** — ${bits.join(", ")}`;
+      return `**${t}**: ${bits.join(", ")}`;
     });
     const fields = [
-      { name: `📅 ${r.monthLabel} — ${n(r.events)} event${n(r.events) === 1 ? "" : "s"}`, value: roleLine(m), inline: false },
-      { name: "🏷️ By event type", value: typeLines.length ? typeLines.join("\n").slice(0, 1024) : "Nothing logged yet this month.", inline: false }
+      { name: `${r.monthLabel}: ${n(r.events)} event${n(r.events) === 1 ? "" : "s"}`, value: roleLine(m), inline: false },
+      { name: "By event type", value: typeLines.length ? typeLines.join("\n").slice(0, 1024) : "Nothing logged yet this month.", inline: false }
     ];
     if (r.quota) {
       const credit = n(w.Host) + n(w["Co-host"]) + n(w.Supervisor);
       let q;
       if (r.quota.exempt) q = "Exempt this week" + (r.loa === "ACTIVE" ? " (on LOA)" : "");
-      else if (r.quota.tick || credit > 0) q = "✅ **Met this week** — " + [n(w.Host) && `${n(w.Host)} hosted`, n(w["Co-host"]) && `${n(w["Co-host"])} co-hosted`, n(w.Supervisor) && `${n(w.Supervisor)} supervised`].filter(Boolean).join(", ");
-      else q = "⬜ **Not met yet this week** — host, co-host or supervise an event before Monday 06:00 UTC.";
+      else if (r.quota.tick || credit > 0) q = "**Met this week:** " + [n(w.Host) && `${n(w.Host)} hosted`, n(w["Co-host"]) && `${n(w["Co-host"])} co-hosted`, n(w.Supervisor) && `${n(w.Supervisor)} supervised`].filter(Boolean).join(", ");
+      else q = "**Not met yet this week.** Host, co-host or supervise an event before Monday 06:00 UTC.";
       if (r.quota.status) q += `\nLast week: **${r.quota.status}**`;
-      fields.push({ name: "📋 Weekly quota", value: q.slice(0, 1024), inline: false });
+      fields.push({ name: "Weekly quota", value: q.slice(0, 1024), inline: false });
     }
-    if (r.loa !== null && r.loa !== undefined) fields.push({ name: "🌴 LOA", value: r.loa === "ACTIVE" ? "On LOA" : "Not on LOA", inline: true });
-    if (r.market) fields.push({ name: "🪙 Market points", value: r.market.infinite ? "∞" : `**${n(r.market.points)}**`, inline: true });
+    if (r.loa !== null && r.loa !== undefined) fields.push({ name: "LOA", value: r.loa === "ACTIVE" ? "On LOA" : "Not on LOA", inline: true });
+    if (r.market) fields.push({ name: "Market points", value: r.market.infinite ? "∞" : `**${n(r.market.points)}**`, inline: true });
     await editReply(env, i, "", [{
       author: { name: CONFIG.NAME },
-      title: `📊 ${r.person.name}`,
+      title: r.person.name,
       description: `${r.person.rank || "—"}${r.person.sheet ? " · " + r.person.sheet : ""}`,
       color: CONFIG.COLOURS.info || CONFIG.COLOURS.approved,
       fields: fields,
@@ -2104,11 +2108,10 @@ async function linkCommand(env, i, o) {
   try {
     const u = caller(i);
     // Your own account only — nobody (staff, admins or owners) can link someone else's.
-    if (o.member && o.member !== u.id) return editReply(env, i, "🔒 **/link** only works on your own Discord account — nobody can link someone else's, staff included. " +
-      "Ask them to run **/link** themselves.");
+    if (o.member && o.member !== u.id) return editReply(env, i, "**/link** only works on your own Discord account. Ask them to run **/link** themselves.");
     o.member = "";
     const roster = await loadRoster(env).catch(() => null);
-    if (!roster) return editReply(env, i, "Couldn't reach the roster — try again in a minute.");
+    if (!roster) return editReply(env, i, "Couldn't reach the roster. Try again in a minute.");
     if (!o.name) {
       const res = await bridge(env, { action: "links", discordId: o.member || u.id });
       const l = res.ok && (res.links || [])[0];
@@ -2126,24 +2129,24 @@ async function linkCommand(env, i, o) {
     const targetUser = o.member ? (((i.data.resolved || {}).users || {})[o.member] || {}) : u;
     const self = target === u.id && p.d && String(p.d).replace(/^@/, "").toLowerCase() === String(u.username || "").toLowerCase();
     if (!self) {
-      return editReply(env, i, `🔒 You can only link to **your own** roster entry — the one with your Discord name (**${u.username}**). ` +
+      return editReply(env, i, `You can only link to the roster entry with your own Discord name (**${u.username}**). ` +
         `**${p.r || p.d}**'s entry has the Discord name **${p.d || "(none)"}**.\n` +
         "If that entry is you and your Discord name changed, ask DMO to correct the Discord name on the roster (or send **/roster update**), then run **/link** again.");
     }
     const res = await bridge(env, { action: "linkDiscord", id: "link-" + i.id, emp: p.e, discordId: target,
       targetName: targetUser.username || "", by: self ? "self" : u.id, byId: u.id, byName: u.username || "" })
       .catch(err => ({ ok: false, error: err.message }));
-    if (!res.ok) return editReply(env, i, "❌ Couldn't link: " + res.error);
+    if (!res.ok) return editReply(env, i, "Couldn't link: " + res.error);
     await forgetReviewer(env, target);
     let roles = "";
     if (CONFIG.GUILD_ID) {
       const r = await syncRolesFor(env, target, p.e).catch(err => ({ error: err.message }));
       roles = "\n\n" + roleSummary(r);
     }
-    await editReply(env, i, `🔗 ${target === u.id ? "You're" : `<@${target}> is`} now linked to **${p.r || p.d}** (employee #${p.e}).` +
-      (res.moved ? `\n-# That Discord account was linked to #${res.moved} before — moved.` : "") + roles);
+    await editReply(env, i, `${target === u.id ? "You're" : `<@${target}> is`} now linked to **${p.r || p.d}** (employee #${p.e}).` +
+      (res.moved ? `\n-# This Discord account was previously linked to #${res.moved}.` : "") + roles);
   } catch (err) {
-    await editReply(env, i, "❌ Couldn't link: " + err.message).catch(() => {});
+    await editReply(env, i, "Couldn't link: " + err.message).catch(() => {});
   }
 }
 
@@ -2153,22 +2156,22 @@ async function linkCommand(env, i, o) {
 async function loaCommand(env, i, o) {
   try {
     const roster = await loadRoster(env).catch(() => null);
-    if (!roster) return editReply(env, i, "Couldn't reach the roster to check you're Management+ — try again in a minute. Nothing was sent.");
+    if (!roster) return editReply(env, i, "Couldn't reach the roster to check your rank. Nothing was sent; try again in a minute.");
     const me = findPerson(roster, i);
-    if (!me) return editReply(env, i, "🔒 **LOA requests are for Management+**, and you aren't on the roster under your Discord name.");
-    if (!isMrPlus(me)) return editReply(env, i, `🔒 **LOA requests are for Management+** — you're **${me.k || "not MR+"}** on the roster.`);
+    if (!me) return editReply(env, i, "LOA requests are for Management+ only, and you aren't on the roster under your Discord name.");
+    if (!isMrPlus(me)) return editReply(env, i, `LOA requests are for Management+ only. Your rank is ${me.k || "below Management"}.`);
     const s = ukToIso(o.start), e = ukToIso(o.end);
-    if (!s || !e) return editReply(env, i, "❌ Use DD/MM/YYYY for both dates, e.g. 07/10/2026.");
-    if (e < s) return editReply(env, i, "❌ The end date can't be before the start date.");
+    if (!s || !e) return editReply(env, i, "Use DD/MM/YYYY for both dates, e.g. 07/10/2026.");
+    if (e < s) return editReply(env, i, "The end date can't be before the start date.");
     const todayIso = new Date().toISOString().slice(0, 10);
-    if (e < todayIso) return editReply(env, i, "❌ That LOA has already ended.");
+    if (e < todayIso) return editReply(env, i, "That LOA has already ended.");
     const days = Math.round((Date.parse(e) - Date.parse(s)) / 86400000) + 1;
-    if (days > 120) return editReply(env, i, "❌ That's over 120 days — talk to Leadership about a longer LOA.");
+    if (days > 120) return editReply(env, i, "LOAs can be at most 120 days. Speak to Leadership about a longer one.");
     const st = { time: `${isoToUk(s)} – ${isoToUk(e)} (${days} day${days === 1 ? "" : "s"})`, reason: String(o.reason || "").trim().slice(0, 300),
       kind: o.type || "Both", notes: String(o.notes || "").trim().slice(0, 300), start: s, end: e };
     await sendRequest(env, i, "loa", st, null);
   } catch (err) {
-    await editReply(env, i, "❌ Couldn't send your LOA: " + err.message).catch(() => {});
+    await editReply(env, i, "Couldn't send your LOA: " + err.message).catch(() => {});
   }
 }
 
@@ -2202,11 +2205,11 @@ async function rosterStart(env, i) {
   if (me) return editReply(env, i, `You're already on the roster as **${me.r || me.d}** (${me.k}). To change your rank or details, use **/roster update**.`);
   const had = await rosterCode(env, u.id, false);
   const c = had || await rosterCode(env, u.id, true);
-  if (had && env.BOT_KV) return editReply(env, i, `🔢 You already have a code: **${c.codes[0]}** — it still works` +
-    ` (until <t:${Math.floor((c.at + 48 * 3600000) / 1000)}:f> at the latest). Use it in your screenshot and run **/roster submit**.`);
-  return editReply(env, i, `🔢 Your code is **${c.codes[0]}**\n\n1. In game, type **${c.codes[0]}** in the chat.\n2. Take a screenshot showing the code **next to your name**.\n` +
+  if (had && env.BOT_KV) return editReply(env, i, `You already have a code: **${c.codes[0]}**. It's valid until <t:${Math.floor((c.at + 48 * 3600000) / 1000)}:f>. ` +
+    "Use it in your screenshot and run **/roster submit**.");
+  return editReply(env, i, `Your code is **${c.codes[0]}**\n\n1. In game, type **${c.codes[0]}** in the chat.\n2. Take a screenshot showing the code **next to your name**.\n` +
     `3. Run **/roster submit** with your Roblox username, timezone, rank and the screenshot.\n\n-# The code lasts ${env.BOT_KV ? "48 hours" : "until midnight UTC tomorrow"}. ` +
-    "Screenshots are sent to Google to help check them; a person always decides.");
+    "Screenshots are shared with Google for an automated check; staff make the decision.");
   } catch (err) {
     await editReply(env, i, "Couldn't make your code: " + err.message).catch(() => {});
   }
@@ -2216,27 +2219,27 @@ async function rosterSubmit(env, i, o) {
   try {
     const u = caller(i);
     const att = ((i.data.resolved || {}).attachments || {})[o.screenshot];
-    if (!att) return editReply(env, i, "No screenshot came through — run **/roster submit** again with one attached.");
-    if (!isAllowedImage(att)) return editReply(env, i, "❌ " + IMAGE_RULE);
+    if (!att) return editReply(env, i, "No screenshot was attached. Run **/roster submit** again with one attached.");
+    if (!isAllowedImage(att)) return editReply(env, i, IMAGE_RULE);
     const roster = await loadRoster(env).catch(() => null);
-    if (!roster) return editReply(env, i, "Couldn't reach the roster to check your application — try again in a minute. Nothing was sent.");
+    if (!roster) return editReply(env, i, "Couldn't reach the roster to check your application. Nothing was sent; try again in a minute.");
     const me = findPerson(roster, i);
     if (me) return editReply(env, i, `You're already on the roster as **${me.r || me.d}** (${me.k}). To change your rank or details, use **/roster update**.`);
     // One application at a time: wait for the last one to be approved or denied.
     const open = await bridge(env, { action: "pendingApplication", discordId: String(u.id || "") }).catch(() => null);
-    if (open && open.ok && open.pending) return editReply(env, i, "⏳ You already have a roster application waiting" +
+    if (open && open.ok && open.pending) return editReply(env, i, "You already have a roster application waiting" +
       (open.pending.at ? ` (sent <t:${Math.floor(open.pending.at / 1000)}:R>)` : "") +
-      ". You can send another once it's been **approved or denied** — you'll get a DM when it is.");
+      ". You can send another once it has been approved or denied. You'll get a DM when that happens.");
     const c = await rosterCode(env, u.id, false);
     if (!c) return editReply(env, i, "Run **/roster start** first to get your code, then put it in your screenshot.");
     const rb = await robloxUser(cleanLine(o.roblox, 40).replace(/^@/, "")).catch(() => ({ unknown: true }));
-    if (rb && rb.missing) return editReply(env, i, `❌ **${cleanLine(o.roblox, 40)}** isn't a Roblox username. Check the spelling.`);
+    if (rb && rb.missing) return editReply(env, i, `**${cleanLine(o.roblox, 40)}** isn't a Roblox username. Check the spelling.`);
     const st = { discord: u.username || "", roblox: rb && rb.name ? rb.name : cleanLine(o.roblox, 40), tz: cleanLine(o.timezone, 12),
       rank: cleanLine(o.rank, 60), ref: cleanLine(o.referrer, 60), code: c.codes[0], codeAlt: c.codes[1] || "",
       robloxId: rb && rb.id ? String(rb.id) : "", robloxChecked: !(rb && rb.unknown) };
     await sendRequest(env, i, "roster", st, att);
   } catch (err) {
-    await editReply(env, i, "❌ Couldn't send your application: " + err.message).catch(() => {});
+    await editReply(env, i, "Couldn't send your application: " + err.message).catch(() => {});
   }
 }
 
@@ -2259,7 +2262,7 @@ async function robloxUser(username) {
 function decisionRow(type) {
   return { type: 1, components: [
     { type: 2, style: 1, label: "Claim", custom_id: "rq:claim:" + type, emoji: { name: "🙋" } },
-    { type: 2, style: 2, label: "Claim it before approving or denying (here or on the roster)", custom_id: "status", disabled: true }] };
+    { type: 2, style: 2, label: "Claim before approving or denying", custom_id: "status", disabled: true }] };
 }
 // Step 2: claimed. claimerId = their Discord ID ("web" when claimed on the roster's Approvals page).
 function claimedRow(type, claimerId, name) {
@@ -2285,7 +2288,7 @@ async function claimAction(env, i, kind, release) {
         await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`, { components: [statusRow(`${res.status} by ${String(res.by || "someone").replace(/^Discord: /, "")}`, res.status === "Denied" ? "✖️" : "✅")], allowed_mentions: NO_PINGS }).catch(() => {});
         return followup(env, i, `It was already **${String(res.status).toLowerCase()}**.`);
       }
-      return followup(env, i, "🔒 " + (res.error || "Couldn't claim it."));
+      return followup(env, i, res.error || "Couldn't claim it.");
     }
     await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`, {
       components: [release ? decisionRow(kind) : claimedRow(kind, u.id, callerName(i))], allowed_mentions: NO_PINGS });
@@ -2307,8 +2310,8 @@ function requestDecisionAction(env, ctx, i) {
   }
   // Older messages (Approve / Deny without a claim): switch them to the Claim step.
   if (!claimer) return { type: R.UPDATE, data: { components: [decisionRow(kind)] } };
-  if (claimer === "web") return reply("🔒 This was claimed on the roster's Approvals page — it has to be decided there, or released first.");
-  if (claimer !== caller(i).id) return reply(`🔒 Claimed by <@${claimer}> — only they can approve or deny it. Claims run out after 30 minutes; then press **Release** and claim it yourself.`);
+  if (claimer === "web") return reply("This was claimed on the roster's Approvals page. It must be decided there, or released first.");
+  if (claimer !== caller(i).id) return reply(`Claimed by <@${claimer}>. Only they can approve or deny it. Claims expire after 30 minutes; you can then press **Release** and claim it yourself.`);
   const title = kind === "event" ? "event log" : REQUESTS[kind].title;
   const box = (id, label, style, max, placeholder, value, required) => ({ type: 18, label: label, component: Object.assign(
     { type: 4, custom_id: id, style: style, max_length: max, required: required !== false, placeholder: placeholder }, value ? { value: value } : {}) });
@@ -2319,7 +2322,7 @@ function requestDecisionAction(env, ctx, i) {
   if (kind === "loa") {
     const timeLine = (String(i.message.content || "").match(/^Time: (.*)$/m) || [])[1] || "";
     const g = guessDates(timeLine);
-    return { type: R.MODAL, data: { custom_id: "rq:loaform", title: "Approve LOA — dates", components: [
+    return { type: R.MODAL, data: { custom_id: "rq:loaform", title: "Approve LOA: dates", components: [
       box("start", "LOA starts (DD/MM/YYYY)", 1, 10, "e.g. 07/10/2026", g[0] ? isoToUk(g[0]) : ""),
       box("end", "LOA ends (DD/MM/YYYY)", 1, 10, "e.g. 14/10/2026", g[1] || g[0] ? isoToUk(g[1] || g[0]) : "")] } };
   }
@@ -2331,8 +2334,8 @@ function requestDecisionSubmit(env, ctx, i) {
   const v = modalValues(i);
   if (i.data.custom_id === "rq:loaform") {
     const s = ukToIso(v.start), e = ukToIso(v.end);
-    if (!s || !e) return reply("❌ Use DD/MM/YYYY for both dates.");
-    if (e < s) return reply("❌ The end date can't be before the start date.");
+    if (!s || !e) return reply("Use DD/MM/YYYY for both dates.");
+    if (e < s) return reply("The end date can't be before the start date.");
     ctx.waitUntil(decideRequest(env, i, "loa", "approve", { start: s, end: e }));
     return { type: R.DEFER_UPDATE };
   }
@@ -2358,9 +2361,9 @@ async function decideRequest(env, i, kind, decision, extra) {
     if (res.needClaim || res.claimedBy) {
       // Claim missing / taken: put the Claim step back so it's clear.
       await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`, { components: [decisionRow(kind)], allowed_mentions: NO_PINGS }).catch(() => {});
-      return followup(env, i, "🔒 " + res.error);
+      return followup(env, i, res.error);
     }
-    return followup(env, i, "❌ Couldn't record that on the roster: " + res.error + "\nNothing was changed.");
+    return followup(env, i, "Couldn't record that on the roster: " + res.error + ". Nothing was changed.");
   }
   if (kind === "event") {
     // Same as a decision on the roster page: card updated, official log posted / submitter DM'd.
@@ -2374,7 +2377,7 @@ async function decideRequest(env, i, kind, decision, extra) {
     if (res.status === "Done" || res.status === "Error") return;
     const what = kind === "loa" ? `LOA ${isoToUk(extra.start)} – ${isoToUk(extra.end)} · ` : "";
     await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`,
-      { components: [statusRow(`${what}Approved by ${who} — the roster adds it within a minute`, "⏳")], allowed_mentions: NO_PINGS }).catch(() => {});
+      { components: [statusRow(`${what}Approved by ${who}. Adding to the roster…`, "⏳")], allowed_mentions: NO_PINGS }).catch(() => {});
   } else {
     await syncRequest(env, { id: id, status: "Denied", by: who, reason: extra.reason, submittedById: res.submittedById || "" });
   }
@@ -2403,7 +2406,7 @@ async function syncScore(env, b) {
   const score = Math.round(Number(b.score));
   const verdict = String(b.verdict || "").toLowerCase();
   const icon = { pass: "🟢", review: "🟡", fail: "🔴", error: "⚪" }[verdict] || "⚪";
-  const text = verdict === "error" ? "couldn't be scored — check it by eye" : `${isNaN(score) ? "?" : score}/100 · ${verdict || "?"}`;
+  const text = verdict === "error" ? "couldn't be scored; check it manually" : `${isNaN(score) ? "?" : score}/100 · ${verdict || "?"}`;
   const label = `${icon} Screenshot check: ${text}`;
   const rk = (id.match(/^(award|roster|loa)-/) || [])[1];
   const msgId = id.replace(/\D/g, "");
@@ -2412,7 +2415,7 @@ async function syncScore(env, b) {
     const message = await discord(env, "GET", path);
     const e = Object.assign({}, (message.embeds || [])[0]);
     e.fields = (e.fields || []).filter(f => !/^🤖 Screenshot check/.test(f.name));
-    e.fields.push({ name: "🤖 Screenshot check (shadow — decides nothing)", value: label.slice(0, 1024), inline: false });
+    e.fields.push({ name: "🤖 Screenshot check (advisory only)", value: label.slice(0, 1024), inline: false });
     const out = { embeds: [e], allowed_mentions: NO_PINGS };
     const kp = keepProof(message);
     if (kp.attachments) out.attachments = kp.attachments;
@@ -2425,12 +2428,12 @@ async function syncScore(env, b) {
   if (channel === CONFIG.APPROVAL_CHANNEL_ID) {
     const path = `/channels/${channel}/messages/${msgId}`;
     const message = await discord(env, "GET", path);
-    const content = String(message.content || "").replace(/\n-# 🤖 Screenshot check:.*$/m, "") + `\n-# 🤖 ${label.replace(/^\S+ /, "")} (shadow — decides nothing)`;
+    const content = String(message.content || "").replace(/\n-# 🤖 Screenshot check:.*$/m, "") + `\n-# 🤖 ${label.replace(/^\S+ /, "")} (advisory only)`;
     await discord(env, "PATCH", path, { content: content.slice(0, 2000), allowed_mentions: NO_PINGS });
   } else {
     // The request channel may be public: the score goes to the reviewers' channel instead.
     await discord(env, "POST", `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages`,
-      { content: `${label} for [this ${REQUESTS[rk].title}](${link}) · shadow mode, decides nothing`, allowed_mentions: NO_PINGS });
+      { content: `${label} for [this ${REQUESTS[rk].title}](${link}) · advisory only`, allowed_mentions: NO_PINGS });
   }
 }
 
@@ -2553,7 +2556,7 @@ async function cronEvents(env, now) {
     if (Number(k.split("|")[0]) < now - 2 * 86400000) { delete st[b][k]; changed = true; }
   }));
   if (changed) await kvPut(env, "state:events", st);
-  return out.join(", ") || (saved ? "" : "first run — " + events.length + " existing events noted, not announced");
+  return out.join(", ") || (saved ? "" : "first run: " + events.length + " existing events noted, not announced");
 }
 
 async function cronHome(env, now) {
@@ -2577,7 +2580,7 @@ async function cronHome(env, now) {
     for (const p of promos) {
       if (st.promos[pkey(p)] || n >= 5) continue;
       await discord(env, "POST", `/channels/${CONFIG.ANNOUNCE_CHANNEL_ID}/messages`, { embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.approved,
-        description: `🎉 **${p.name}** has been promoted to **${p.to}**${p.from ? ` (from ${p.from})` : ""}! Congratulations!` }], allowed_mentions: NO_PINGS });
+        description: `**${p.name}** has been promoted to **${p.to}**${p.from ? ` (from ${p.from})` : ""}. Congratulations.` }], allowed_mentions: NO_PINGS });
       st.promos[pkey(p)] = now; n++; changed = true; out.push("promotion " + p.name);
     }
   }
@@ -2591,7 +2594,7 @@ async function cronHome(env, now) {
   if (aKey !== st.ann) {
     if (aKey && saved && CONFIG.ANNOUNCE_CHANNEL_ID) {
       await discord(env, "POST", `/channels/${CONFIG.ANNOUNCE_CHANNEL_ID}/messages`, { embeds: [{ author: { name: CONFIG.NAME },
-        color: CONFIG.COLOURS.info, title: "📣 " + (aTitle || "Announcement"), description: aText.slice(0, 4000) }], allowed_mentions: NO_PINGS });
+        color: CONFIG.COLOURS.info, title: aTitle || "Announcement", description: aText.slice(0, 4000) }], allowed_mentions: NO_PINGS });
       out.push("announcement");
     }
     st.ann = aKey; changed = true;
@@ -2607,7 +2610,7 @@ async function cronHome(env, now) {
   }
 
   if (changed) await kvPut(env, "state:home", st);
-  return out.join(", ") || (saved ? "" : "first run — current promotions and announcement noted, not posted");
+  return out.join(", ") || (saved ? "" : "first run: current promotions and announcement noted, not posted");
 }
 
 function digestEmbed(home, promos, now) {
@@ -2631,13 +2634,13 @@ function digestEmbed(home, promos, now) {
   }
   const recent = promos.filter(p => !p.at || p.at > now - 7 * 86400000);
   const fields = [];
-  if (recent.length) fields.push({ name: `🎉 Promotions (${recent.length})`, value: recent.slice(0, 15).map(p => `• ${p.name} → ${p.to}`).join("\n").slice(0, 1024), inline: false });
+  if (recent.length) fields.push({ name: `Promotions (${recent.length})`, value: recent.slice(0, 15).map(p => `• ${p.name} → ${p.to}`).join("\n").slice(0, 1024), inline: false });
   const newbies = hqList(weekly, ["newMembers", "joined"]).map(x => typeof x === "string" ? x : pick(x, ["name", "roblox"], "")).filter(Boolean);
-  if (newbies.length) fields.push({ name: `👋 New members (${newbies.length})`, value: newbies.slice(0, 30).join(", ").slice(0, 1024), inline: false });
+  if (newbies.length) fields.push({ name: `New members (${newbies.length})`, value: newbies.slice(0, 30).join(", ").slice(0, 1024), inline: false });
   const next = pick(home, ["nextEvent"], null);
-  if (next) { const ev = hqEvents([next])[0]; if (ev) fields.push({ name: "📅 Next event", value: `**${ev.title}** — <t:${ts(ev.start)}:F>`, inline: false }); }
-  return { author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: "🗞️ Last week in the department",
-    description: lines.join("\n") || "Here's how last week went.", fields: fields, footer: { text: "Week ending " + new Date(now - 86400000).toISOString().slice(0, 10) } };
+  if (next) { const ev = hqEvents([next])[0]; if (ev) fields.push({ name: "Next event", value: `**${ev.title}**, <t:${ts(ev.start)}:F>`, inline: false }); }
+  return { author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: "Last week in the department",
+    description: lines.join("\n") || "Summary of last week.", fields: fields, footer: { text: "Week ending " + new Date(now - 86400000).toISOString().slice(0, 10) } };
 }
 function mondayKey(now) { const d = new Date(now); const back = (d.getUTCDay() + 6) % 7; return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - back)).toISOString().slice(0, 10); }
 async function sha(s) {
@@ -2658,9 +2661,9 @@ async function cronApprovalReminders(env, now) {
   (res.items || []).forEach(x => { pendingIds[x.id] = true; });
   Object.keys(st).forEach(k => { if (!pendingIds[k]) delete st[k]; });
   if (old.length) {
-    const lines = old.slice(0, 15).map(x => `• **${x.title || "Event log"}** — from ${x.by || "someone"}, waiting since <t:${ts(x.at)}:R>`);
+    const lines = old.slice(0, 15).map(x => `• **${x.title || "Event log"}** from ${x.by || "someone"}, waiting since <t:${ts(x.at)}:R>`);
     await discord(env, "POST", `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages`, {
-      content: `<@&${CONFIG.APPROVER_ROLE_ID}> ⏰ **${old.length} waiting more than ${CONFIG.APPROVAL_REMINDER_HOURS || 12} hours** — decide them here or on the roster's Approvals page:\n` +
+      content: `<@&${CONFIG.APPROVER_ROLE_ID}> **${old.length} waiting for more than ${CONFIG.APPROVAL_REMINDER_HOURS || 12} hours.** Please review them here or on the roster's Approvals page:\n` +
         lines.join("\n") + (old.length > 15 ? `\n…and ${old.length - 15} more.` : ""),
       allowed_mentions: { parse: [], roles: [CONFIG.APPROVER_ROLE_ID] } });
     old.forEach(x => { st[x.id] = now; });
@@ -2908,7 +2911,7 @@ async function syncRolesFor(env, userId, emp, mode, names, given) {
   }
   if (!entry && !one.ok) return { error: "couldn't reach the roster (" + String(one.error || "no answer").slice(0, 60) + ")" };
   if (!entry) return { error: names ? `${names.discord || names.roblox} isn't on the roster yet`
-    : `employee #${emp || "?"} wasn't found on the roster — ${ROLE_SOURCE || "roster via bridge"}` };
+    : `employee #${emp || "?"} wasn't found on the roster (${ROLE_SOURCE || "roster via bridge"})` };
   const member = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/members/${userId}`).catch(() => null);
   if (!member) return { error: "not in the server" };
   const plan = await rolePlan(env, byEmp, !ROLE_PLAN || ROLE_PLAN.awardSig !== AWARD_NAMES.join("|"));
@@ -2974,19 +2977,19 @@ async function syncRolesFor(env, userId, emp, mode, names, given) {
 const TIER_LABEL = { LR: "Low Rank", MR: "Middle Rank", HR: "High Rank", EX: "Executive", Leadership: "War Council" };
 function roleSummary(r) {
   if (!r) return "";
-  if (r.error) return `⚠️ Roles not updated (${r.error}).`;
+  if (r.error) return `Roles not updated (${r.error}).`;
   if (r.noRoles) return r.tooHigh && r.tooHigh.length
-    ? `⚠️ No roles changed: the matching roles (${r.tooHigh.slice(0, 5).join(", ")}${r.tooHigh.length > 5 ? "…" : ""}) are above the bot's role. Move the bot's role above them in Server Settings → Roles.`
-    : "⚠️ No roles in the server match the roster's ranks, tiers or DMO/CPM, so nothing was changed.";
+    ? `No roles changed: the matching roles (${r.tooHigh.slice(0, 5).join(", ")}${r.tooHigh.length > 5 ? "…" : ""}) are above the bot's role. Move the bot's role above them in Server Settings → Roles.`
+    : "No roles in the server match the roster's ranks, tiers or DMO/CPM, so nothing was changed.";
   const lines = ["**On the roster**",
     `> **Rank:** ${r.rank || "—"}${r.tier ? ` (${TIER_LABEL[r.tier] || r.tier})` : ""}`,
     `> **Departments:** ${[r.dmo && "DMO – " + r.dmo, r.cpm && "CPM – " + r.cpm].filter(Boolean).join(" · ") || "none"}`,
     `> **Awards:** ${r.awards && r.awards.length ? r.awards.join(", ") : "none"}`];
   if (!r.added.length && !r.removed.length && !(r.failed || []).length) {
-    lines.push("", "✅ Your Discord roles already match the roster — nothing changed.");
+    lines.push("", "Your Discord roles already match the roster.");
     return lines.join("\n");
   }
-  const parts = [["rank", "🎖️ Rank"], ["group", "📂 Rank group"], ["dept", "🏢 Department"], ["award", "🏅 Awards"], ["staff", "👥 Staff"]];
+  const parts = [["rank", "Rank"], ["group", "Rank group"], ["dept", "Department"], ["award", "Awards"], ["staff", "Staff"]];
   lines.push("", "**Discord roles updated**");
   parts.forEach(([k, label]) => {
     const add = r.added.filter(id => r.kindOf(id) === k), rem = r.removed.filter(id => r.kindOf(id) === k);
@@ -2996,7 +2999,7 @@ function roleSummary(r) {
     if (rem.length) bits.push("removed " + rem.map(id => `<@&${id}>`).join(" "));
     lines.push(`> **${label}:** ${bits.join(" · ")}`);
   });
-  if (r.failed && r.failed.length) lines.push(`⚠️ Discord wouldn't let the bot change ${r.failed.map(id => `<@&${id}>`).join(" ")} — the bot's role must be above ${r.failed.length === 1 ? "it" : "them"}, with Manage Roles.`);
+  if (r.failed && r.failed.length) lines.push(`The bot couldn't change ${r.failed.map(id => `<@&${id}>`).join(" ")}. Its role must be above ${r.failed.length === 1 ? "it" : "them"} and have Manage Roles.`);
   return lines.join("\n");
 }
 
@@ -3014,7 +3017,7 @@ async function cronRoles(env, now) {
     if (!Object.keys(plan.managed).length) {
       await kvPut(env, "state:rolequeue", { at: now, items: [] });
       return plan.tooHigh.length
-        ? `${plan.tooHigh.length} roles match the roster but are ABOVE the bot's role ("${plan.botRole || "?"}"), so it can't give them: ` +
+        ? `${plan.tooHigh.length} roles match the roster but are above the bot's role ("${plan.botRole || "?"}"), so it can't give them: ` +
           plan.tooHigh.slice(0, 20).join(", ") + ". Drag the bot's role above them in Server Settings > Roles."
         : `none of the server's ${plan.serverRoles} roles match the roster's rank names (open /diag to compare)`;
     }
@@ -3125,7 +3128,7 @@ const COMMUNITY_COMMANDS = [
       { type: 3, name: "description", description: "What it's about", required: false, max_length: 1000 }] },
     { type: 1, name: "cancel", description: "Cancel an upcoming event (Management+)", options: [
       { type: 3, name: "event", description: "Start typing the event's name", required: true, autocomplete: true }] },
-    { type: 1, name: "log", description: "Log an event for approval — opens a panel to fill in", options: [
+    { type: 1, name: "log", description: "Log an event for approval", options: [
         { type: 3, name: "type", description: "What kind of event it was", required: true,
           choices: EVENT_TYPES.map(t => ({ name: t, value: t })) },
         { type: 3, name: "other", description: "Only for Other: what the event was (up to 60 characters)", required: false, max_length: 60 },
@@ -3134,7 +3137,7 @@ const COMMUNITY_COMMANDS = [
       { type: 5, name: "share", description: "Post it in the channel for everyone (default: only you see it)", required: false }] }] },
   { name: "profile", description: "Someone's public profile", dm_permission: false, options: [
     { type: 3, name: "name", description: "Start typing a Discord or Roblox name (default: you)", required: false, autocomplete: true, max_length: 60 },
-    { type: 6, name: "member", description: "…or pick a server member", required: false },
+    { type: 6, name: "member", description: "Or pick a server member", required: false },
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
   { name: "leaderboard", description: "This month's top hosts and attendees", dm_permission: false, options: [
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
@@ -3156,8 +3159,8 @@ const COMMUNITY_COMMANDS = [
 // Messages — one consistent "event card" used everywhere
 // ---------------------------------------------------------------------
 const UI = {
-  type: "🏷️ Type", date: "📅 Date", host: "🎤 Host", sup: "🛡️ Supervisor", co: "🤝 Co-hosts", att: "👥 Attendees",
-  notes: "📝 Notes", check: "🔎 Roster check", points: "🏅 Roster", reason: "💬 Reason"
+  type: "Type", date: "Date", host: "Host", sup: "Supervisor", co: "Co-hosts", att: "Attendees",
+  notes: "Notes", check: "Roster check", points: "Roster", reason: "Reason"
 };
 
 // The official text format (used for #event-logs, with pings).
@@ -3189,7 +3192,7 @@ function nameFields(title, names) {
 
 function cardFields(log) {
   return [
-    { name: UI.type, value: (log.event || "—") + (log.doubleAP ? " · ⚡ Double AP" : ""), inline: false },
+    { name: UI.type, value: (log.event || "—") + (log.doubleAP ? " · Double AP" : ""), inline: false },
     { name: UI.date, value: log.date || "—", inline: true },
     { name: UI.host, value: log.host || "—", inline: true },
     { name: UI.sup, value: log.supervisor || "—", inline: true }
@@ -3206,9 +3209,9 @@ const ts = (ms) => Math.floor((ms || Date.now()) / 1000);
 function card(log, state, o) {
   const sub = o.submitterId ? `<@${o.submitterId}>` : "unknown";
   const head = {
-    pending:  `🟡 **Awaiting approval** on the roster's Approvals page\nSubmitted by ${sub} · <t:${ts(o.submittedAt)}:R>`,
-    approved: `🟢 **Approved** by ${o.by} · <t:${ts()}:f>\nSubmitted by ${sub} · <t:${ts(o.submittedAt)}:f>\nThe official log is in <#${CONFIG.EVENT_LOG_CHANNEL_ID}>.`,
-    denied:   `🔴 **Denied** by ${o.by} · <t:${ts()}:f>\nSubmitted by ${sub} · <t:${ts(o.submittedAt)}:f>`
+    pending:  `**Awaiting approval** on the roster's Approvals page\nSubmitted by ${sub} · <t:${ts(o.submittedAt)}:R>`,
+    approved: `**Approved** by ${o.by} · <t:${ts()}:f>\nSubmitted by ${sub} · <t:${ts(o.submittedAt)}:f>\nThe official log is in <#${CONFIG.EVENT_LOG_CHANNEL_ID}>.`,
+    denied:   `**Denied** by ${o.by} · <t:${ts()}:f>\nSubmitted by ${sub} · <t:${ts(o.submittedAt)}:f>`
   }[state];
   const fields = cardFields(log);
   if (o.check) fields.push(o.check);
@@ -3216,7 +3219,7 @@ function card(log, state, o) {
   if (o.points) fields.push({ name: UI.points, value: o.points, inline: false });
   const embed = {
     author: { name: CONFIG.NAME },
-    title: "📋 " + (log.event || "Event log"),
+    title: log.event || "Event log",
     description: head,
     color: CONFIG.COLOURS[state],
     fields: fields,
@@ -3253,7 +3256,7 @@ function cardState(message) {
   return {
     submitterId: m ? m[1] : "",
     submittedAt: e.timestamp ? Date.parse(e.timestamp) : Date.now(),
-    check: (e.fields || []).find(f => f.name === UI.check || f.name === "Roster check") || null,
+    check: (e.fields || []).find(f => plainName(f.name) === plainName(UI.check)) || null,
     fields: e.fields || []
   };
 }
@@ -3280,7 +3283,7 @@ function parseLog(message) {
     return { event: get("Event"), date: get("Date"), host: get("Host"), supervisor: get("Supervisor"),
              cohosts: list(get("Co-Host")), attendees: list(get("Attendees")), notes: notes === "None" ? "" : notes };
   }
-  const f = (label) => (e.fields || []).filter(x => x.name.startsWith(label)).map(x => x.value).filter(v => v !== "—").join(", ");
+  const f = (label) => (e.fields || []).filter(x => sameField(x.name, label)).map(x => x.value).filter(v => v !== "—").join(", ");
   const list = (s) => s ? s.split(",").map(x => x.trim()).filter(Boolean) : [];
   return {
     event: String(e.title || "").replace(/^📋\s*/, ""),
@@ -3301,8 +3304,8 @@ function approvalDm(log, message) {
   const link = `https://discord.com/channels/${CONFIG.GUILD_ID || "@me"}/${CONFIG.APPROVAL_CHANNEL_ID}/${message.id}`;
   return { embeds: [{
     author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.approved,
-    title: "✅ Your event log was approved",
-    description: `**${log.event}**${log.doubleAP ? " · ⚡ Double AP" : ""} · ${log.date}` + (by ? `\nApproved by ${by}` : "") +
+    title: "Your event log was approved",
+    description: `**${log.event}**${log.doubleAP ? " · Double AP" : ""} · ${log.date}` + (by ? `\nApproved by ${by}` : "") +
       `\nThe points have been added to the roster. [View the log](${link})`,
     footer: { text: `${log.attendees.length} attendee${log.attendees.length === 1 ? "" : "s"}` },
     timestamp: new Date().toISOString()
@@ -3528,6 +3531,6 @@ async function registerCommands(env) {
     ].concat(Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => Object.assign({ name: REQUESTS[k].command, description: REQUESTS[k].description, dm_permission: false },
       REQUESTS[k].options ? { options: REQUESTS[k].options } : {})), COMMUNITY_COMMANDS))
   });
-  return new Response(res.ok ? "Done — /lookup, " + Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => "/" + REQUESTS[k].command).join(", ") +
+  return new Response(res.ok ? "Done. /lookup, " + Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => "/" + REQUESTS[k].command).join(", ") +
     ", " + COMMUNITY_COMMANDS.map(c => "/" + c.name).join(", ") + " are registered. They can take a minute to appear in Discord." : "Failed: " + (await res.text()), { status: res.ok ? 200 : 500 });
 }
