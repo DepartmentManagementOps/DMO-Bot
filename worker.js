@@ -873,9 +873,10 @@ async function syncRequest(env, b) {
       }
     }
   }
-  if (row) await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
+  const rolesToo = b.status === "Done" && (type === "roster" || type === "award") && CONFIG.GUILD_ID;
+  if (row && !rolesToo) await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
   // Approved roster / award request: give that person their roles straight away.
-  if (b.status === "Done" && (type === "roster" || type === "award") && CONFIG.GUILD_ID) {
+  if (rolesToo) {
     // Straight to the person who sent it, through their link (the roster links a new member just before
     // it says "Done"); else worked out from the request message.
     let r = null;
@@ -889,6 +890,12 @@ async function syncRequest(env, b) {
     if (r && !r.error) await markRequestRoles(env, b.id, "done");
     await noteRoles(env, b.id + " (approved)", b.submittedById, r);
     if (r && r.error) console.warn("Roles after " + b.id + ": " + r.error);
+    // The message says how the roles went, so staff can see it without /diag.
+    const failed = r && !r.error && (r.failed || []).length;
+    row = r && !r.error
+      ? statusRow(`Approved by ${who} · roles given` + (failed ? ` (${failed} not allowed — move the bot's role higher)` : ""), failed ? "⚠️" : "✅")
+      : statusRow(`Approved by ${who} · roles not given: ${String((r && r.error) || "unknown").slice(0, 40)}`, "⚠️");
+    await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
   }
   if (dmText && b.submittedById) await dm(env, b.submittedById, { embeds: [{ author: { name: CONFIG.NAME }, color: colour, description: dmText, timestamp: new Date().toISOString() }] });
 }
@@ -2091,6 +2098,10 @@ async function myStatsCommand(env, i) {
 async function linkCommand(env, i, o) {
   try {
     const u = caller(i);
+    // Your own account only — nobody (staff, admins or owners) can link someone else's.
+    if (o.member && o.member !== u.id) return editReply(env, i, "🔒 **/link** only works on your own Discord account — nobody can link someone else's, staff included. " +
+      "Ask them to run **/link** themselves.");
+    o.member = "";
     const roster = await loadRoster(env).catch(() => null);
     if (!roster) return editReply(env, i, "Couldn't reach the roster — try again in a minute.");
     if (!o.name) {
@@ -2109,10 +2120,10 @@ async function linkCommand(env, i, o) {
     const target = o.member || u.id;
     const targetUser = o.member ? (((i.data.resolved || {}).users || {})[o.member] || {}) : u;
     const self = target === u.id && p.d && String(p.d).replace(/^@/, "").toLowerCase() === String(u.username || "").toLowerCase();
-    if (!self && !(await reviewerCheck(env, u)).ok) {
-      return editReply(env, i, target === u.id
-        ? `Your Discord name (**${u.username}**) doesn't match **${p.r || p.d}**'s roster entry (**${p.d || "no Discord name"}**). Ask a reviewer to link you: a DMO member runs **/link name:${p.r || p.d} member:@you**.`
-        : "🔒 Only DMO members (linked with /link) can link someone else's account.");
+    if (!self) {
+      return editReply(env, i, `🔒 You can only link to **your own** roster entry — the one with your Discord name (**${u.username}**). ` +
+        `**${p.r || p.d}**'s entry has the Discord name **${p.d || "(none)"}**.\n` +
+        "If that entry is you and your Discord name changed, ask DMO to correct the Discord name on the roster (or send **/roster update**), then run **/link** again.");
     }
     const res = await bridge(env, { action: "linkDiscord", id: "link-" + i.id, emp: p.e, discordId: target,
       targetName: targetUser.username || "", by: self ? "self" : u.id, byId: u.id, byName: u.username || "" })
@@ -3119,8 +3130,7 @@ const COMMUNITY_COMMANDS = [
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
   { name: "mystats", description: "Your month so far: events by type, quota, LOA and Market points (only you see it)", dm_permission: false },
   { name: "link", description: "Link to your roster entry and get your rank, department, award and staff roles", dm_permission: false, options: [
-    { type: 3, name: "name", description: "First time: pick your roster name. Already linked: leave empty to update your roles", required: false, autocomplete: true, max_length: 60 },
-    { type: 6, name: "member", description: "DMO only: link or update this member instead of yourself", required: false }] },
+    { type: 3, name: "name", description: "First time: pick your roster name. Already linked: leave empty to update your roles", required: false, autocomplete: true, max_length: 60 }] },
   { name: "roster", description: "Apply to be rostered, or update your rank / details", dm_permission: false, options: [
     { type: 1, name: "start", description: "New members, step 1: get your code to type in the in-game chat" },
     { type: 1, name: "update", description: "Already on the roster: request a rank or details change" },
