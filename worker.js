@@ -934,6 +934,16 @@ function findPerson(roster, i) {
   for (const t of tries) { const p = roster.by[String(t).toLowerCase()]; if (p) return p; }
   return null;
 }
+// On the roster? By Discord name first (no extra request), else by a /link to a roster entry.
+// true / false, or null when the roster couldn't be reached (the roster checks again when it's sent).
+async function onRosterCheck(env, roster, i) {
+  if (roster && findPerson(roster, i)) return true;
+  const u = caller(i);
+  const l = await bridge(env, { action: "links", discordId: String(u.id || "") }).catch(() => null);
+  if (l && l.ok) return (l.links || []).length > 0;
+  return roster ? false : null;
+}
+const NOT_ROSTERED = "🚫 Only people on the roster can log events. You aren't on it under your Discord name — if you are on it under another name, ask DMO to link you with **/link**.";
 function rankNumber(rank) { const m = String(rank || "").match(/^\s*(\d+)/); return m ? Number(m[1]) : 0; }
 // MR+ = Management sheet (MR, HR, EX) or Department Leadership — rank 06 and above.
 function isMrPlus(p) { return p.s === "Management" || p.s === "Leadership" || rankNumber(p.k) >= 6; }
@@ -1055,6 +1065,11 @@ async function eventLogStart(env, ctx, opts, i) {
   if (!types) ctx.waitUntil(eventTypes(env).catch(() => {}));
   if (!roster) ctx.waitUntil(loadRoster(env).catch(() => {}));
   if (types && types[type] && !types[type].enabled) return reply(`🚫 **${type}** events are turned off right now.`);
+  if (linked(env) && roster && !findPerson(roster, i)) {
+    // Kept short: Discord needs the answer within 3 seconds (Submit checks again properly).
+    const ok = await Promise.race([onRosterCheck(env, roster, i).catch(() => null), new Promise(r => setTimeout(() => r(null), 900))]);
+    if (ok === false) return reply(NOT_ROSTERED);
+  }
   const draft = blankDraft();
   draft.event = eventLabel(type, other);
   draft.doubleAP = opts.double_ap === true;
@@ -1248,6 +1263,10 @@ async function submit(env, i, draft, who) {
       const types = await eventTypes(env, true).catch(() => null);
       if (types && types[t.type] && !types[t.type].enabled) throw new Error(`${t.type} events are turned off right now.`);
     }
+    if (linked(env)) {
+      const ok = await onRosterCheck(env, await loadRoster(env).catch(() => null), i);
+      if (ok === false) throw new Error(NOT_ROSTERED.replace(/^🚫 /, ""));
+    }
     await editOriginal(env, i, { content: "⏳ **Sending your event log…**", components: [] });
 
     let check = null;
@@ -1270,7 +1289,7 @@ async function submit(env, i, draft, who) {
     let note = "";
     if (linked(env)) {
       const q = await bridge(env, {
-        action: "submit", id: msg.id, submittedBy: who.name, submittedById: who.id, log: log,
+        action: "submit", id: msg.id, submittedBy: who.name, submittedById: who.id, byName: caller(i).username || "", log: log,
         proof: `https://discord.com/channels/${i.guild_id}/${CONFIG.APPROVAL_CHANNEL_ID}/${msg.id}`,
         proofName: proof.name, proofType: proof.type, proofData: base64(proof.data)
       }).catch(e => ({ ok: false, error: e.message }));
