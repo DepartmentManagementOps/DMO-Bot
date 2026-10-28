@@ -934,16 +934,27 @@ function findPerson(roster, i) {
   for (const t of tries) { const p = roster.by[String(t).toLowerCase()]; if (p) return p; }
   return null;
 }
-// On the roster? By Discord name first (no extra request), else by a /link to a roster entry.
-// true / false, or null when the roster couldn't be reached (the roster checks again when it's sent).
-async function onRosterCheck(env, roster, i) {
-  if (roster && findPerson(roster, i)) return true;
+// Who's logging: their roster entry by Discord name first (no extra request), else by a /link.
+// The entry ({ d, r, k, s, e }), false = not on the roster, null = the roster couldn't be reached.
+async function loggerOf(env, roster, i) {
+  const p = roster && findPerson(roster, i);
+  if (p) return p;
   const u = caller(i);
   const l = await bridge(env, { action: "links", discordId: String(u.id || "") }).catch(() => null);
-  if (l && l.ok) return (l.links || []).length > 0;
+  if (l && l.ok) {
+    const emp = ((l.links || [])[0] || {}).emp;
+    if (!emp) return false;
+    const hit = roster && roster.list.find(x => normEmp(x.e) === normEmp(emp));
+    return hit || { e: emp, k: "", s: "" };          // linked, rank unknown here: the roster checks again
+  }
   return roster ? false : null;
 }
-const NOT_ROSTERED = "🚫 Only people on the roster can log events. You aren't on it under your Discord name — if you are on it under another name, ask DMO to link you with **/link**.";
+// Event logs: Middle Management (rank 06) and above only. Text for refusing, or "" when they may.
+function cantLog(p) {
+  if (p === false) return "🚫 Only **Middle Management and above** can log events, and you aren't on the roster under your Discord name. If you're on it under another name, ask DMO to link you with **/link**.";
+  if (p && (p.s || p.k) && !isMrPlus(p)) return `🚫 Only **Middle Management and above** (rank 06+) can log events — you're **${p.k || p.s}**.`;
+  return "";
+}
 function rankNumber(rank) { const m = String(rank || "").match(/^\s*(\d+)/); return m ? Number(m[1]) : 0; }
 // MR+ = Management sheet (MR, HR, EX) or Department Leadership — rank 06 and above.
 function isMrPlus(p) { return p.s === "Management" || p.s === "Leadership" || rankNumber(p.k) >= 6; }
@@ -1065,10 +1076,11 @@ async function eventLogStart(env, ctx, opts, i) {
   if (!types) ctx.waitUntil(eventTypes(env).catch(() => {}));
   if (!roster) ctx.waitUntil(loadRoster(env).catch(() => {}));
   if (types && types[type] && !types[type].enabled) return reply(`🚫 **${type}** events are turned off right now.`);
-  if (linked(env) && roster && !findPerson(roster, i)) {
+  if (linked(env) && roster) {
     // Kept short: Discord needs the answer within 3 seconds (Submit checks again properly).
-    const ok = await Promise.race([onRosterCheck(env, roster, i).catch(() => null), new Promise(r => setTimeout(() => r(null), 900))]);
-    if (ok === false) return reply(NOT_ROSTERED);
+    const who = findPerson(roster, i) || await Promise.race([loggerOf(env, roster, i).catch(() => null), new Promise(r => setTimeout(() => r(null), 900))]);
+    const no = cantLog(who);
+    if (no) return reply(no);
   }
   const draft = blankDraft();
   draft.event = eventLabel(type, other);
@@ -1264,8 +1276,8 @@ async function submit(env, i, draft, who) {
       if (types && types[t.type] && !types[t.type].enabled) throw new Error(`${t.type} events are turned off right now.`);
     }
     if (linked(env)) {
-      const ok = await onRosterCheck(env, await loadRoster(env).catch(() => null), i);
-      if (ok === false) throw new Error(NOT_ROSTERED.replace(/^🚫 /, ""));
+      const no = cantLog(await loggerOf(env, await loadRoster(env).catch(() => null), i));
+      if (no) throw new Error(no.replace(/^🚫 /, ""));
     }
     await editOriginal(env, i, { content: "⏳ **Sending your event log…**", components: [] });
 
