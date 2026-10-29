@@ -2064,52 +2064,143 @@ async function leaderboardCommand(env, i) {
   }
 }
 
-// ---- /mystats: the caller's own month, privately ----
+// ---- /mystats: the caller's own stats, privately ----
+// Shows the stats straight away, then adds a picture of their website profile when the screenshot service
+// is set up (Cloudflare Browser Run: secrets CF_ACCOUNT_ID and CF_BROWSER_TOKEN; pictures are kept 6 hours).
+const STAT_LABEL = { attended: "Attended", cohosted: "Co-hosted", hosted: "Hosted", supervised: "Supervised" };
+function siteBase(env) { try { return new URL(hqBase(env)).origin; } catch (e) { return ""; } }
+function profileUrl(env, emp) {
+  if (!emp) return "";
+  if (CONFIG.HQ_PROFILE_URL) return CONFIG.HQ_PROFILE_URL.replace("{emp}", encodeURIComponent(emp));
+  const base = siteBase(env);
+  return base ? base + "/p/" + encodeURIComponent(emp) : "";
+}
+/** A text progress bar: ██████░░░░ */
+function progressBar(have, need, width) {
+  const k = need > 0 ? Math.max(0, Math.min(width, Math.round(have / need * width))) : width;
+  return "█".repeat(k) + "░".repeat(width - k);
+}
+function promotionText(pr) {
+  if (!pr) return "";
+  if (pr.merit) return "Promotion to **" + pr.next + "** is merit-based: there's no event minimum. Leadership decides.";
+  if (!pr.lines.length) return "No event requirements are set for **" + pr.next + "**.";
+  const met = pr.lines.filter(l => l.have >= l.need).length;
+  const w = Math.max(...pr.lines.map(l => STAT_LABEL[l.f].length));
+  const rows = pr.lines.map(l => STAT_LABEL[l.f].padEnd(w) + "  " + progressBar(l.have, l.need, 12) + "  " + (l.have + " / " + l.need).padStart(7) + (l.have >= l.need ? "  ✓" : ""));
+  const head = pr.eligible ? "✅ **Eligible for promotion.** You meet every event requirement; promotions are still decided by leadership."
+    : "**" + met + " of " + pr.lines.length + "** requirements met.";
+  return (head + "\n```\n" + rows.join("\n") + "\n```").slice(0, 1024);
+}
+function typeTable(byType, isWorker) {
+  const n = x => Number(x) || 0;
+  const types = Object.keys(byType || {}).sort((a, b) => {
+    const ia = EVENT_TYPES.indexOf(a), ib = EVENT_TYPES.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
+  });
+  if (!types.length) return "";
+  const cols = isWorker ? [["Co-host", "Co-host"], ["Att.", "Attendee"]] : [["Host", "Host"], ["Co-host", "Co-host"], ["Sup.", "Supervisor"], ["Att.", "Attendee"]];
+  const name = t => t.length > 16 ? t.slice(0, 15) + "…" : t;
+  const w = Math.max(4, ...types.map(t => name(t).length));
+  const line = (label, vals) => label.padEnd(w) + vals.map((v, k) => String(v).padStart(cols[k][0].length + 2)).join("");
+  return ("```\n" + [line("Type", cols.map(c => c[0])), ...types.map(t => line(name(t), cols.map(c => n(byType[t][c[1]]))))].join("\n") + "\n```").slice(0, 1024);
+}
+async function profileShot(env, emp) {
+  const url = profileUrl(env, emp);
+  if (!env.CF_ACCOUNT_ID || !env.CF_BROWSER_TOKEN || !env.BOT_KV || !url) return null;
+  const key = "shot:" + emp;
+  try {
+    const hit = await env.BOT_KV.getWithMetadata(key, "arrayBuffer");
+    if (hit && hit.value) return { name: "profile.png", type: "image/png", data: hit.value, at: (hit.metadata && hit.metadata.at) || 0 };
+  } catch (e) { /* take a new one */ }
+  const body = JSON.stringify({
+    url, viewport: { width: 1100, height: 900, deviceScaleFactor: 1.5 },
+    gotoOptions: { waitUntil: "networkidle0", timeout: 25000 },
+    waitForSelector: { selector: ".profile:not([aria-busy]) .record", timeout: 20000 },
+    selector: ".wrap.profile",
+    addStyleTag: [{ content: ".profile .back, .profile .pro-side .block:last-child { display: none !important; } .wrap.profile { padding-bottom: 24px !important; }" }]
+  });
+  for (const path of ["browser-run", "browser-rendering"]) {           // the service's new and old names
+    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/${path}/screenshot`, {
+      method: "POST", headers: { Authorization: "Bearer " + env.CF_BROWSER_TOKEN, "Content-Type": "application/json" }, body });
+    if (res.status === 404) continue;
+    if (!res.ok || !/^image\//.test(res.headers.get("Content-Type") || "")) throw new Error("screenshot service " + res.status + ": " + (await res.text()).slice(0, 200));
+    const data = await res.arrayBuffer(), at = Date.now();
+    await env.BOT_KV.put(key, data, { expirationTtl: 6 * 3600, metadata: { at } }).catch(() => {});
+    return { name: "profile.png", type: "image/png", data, at };
+  }
+  return null;
+}
 async function myStatsCommand(env, i) {
   try {
     if (!linked(env)) return editReply(env, i, "The roster isn't linked yet.");
     const u = caller(i);
     const r = await bridge(env, { action: "mystats", byId: u.id, byName: u.username || "" });
     if (!r.ok) throw new Error(r.error || "the roster didn't answer");
-    if (!r.person) return editReply(env, i, `You aren't on the roster under your Discord name (**${u.username}**). If your roster entry uses a different name, ask to have it updated.`);
-    const n = (x) => Number(x) || 0;
-    const m = r.month || {}, w = r.week || {};
-    const roleLine = (o) => [["Hosted", o.Host], ["Co-hosted", o["Co-host"]], ["Supervised", o.Supervisor], ["Attended", o.Attendee]]
-      .map(([label, v]) => `${label} **${n(v)}**`).join(" · ");
-    const types = Object.keys(r.byType || {}).sort((a, b) => {
-      const ia = EVENT_TYPES.indexOf(a), ib = EVENT_TYPES.indexOf(b);
-      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
-    });
-    const typeLines = types.map(t => {
-      const o = r.byType[t];
-      const bits = [["hosted", o.Host], ["co-hosted", o["Co-host"]], ["supervised", o.Supervisor], ["attended", o.Attendee]]
-        .filter(([, v]) => n(v)).map(([label, v]) => `${n(v)} ${label}`);
-      return `**${t}**: ${bits.join(", ")}`;
-    });
-    const fields = [
-      { name: `${r.monthLabel}: ${n(r.events)} event${n(r.events) === 1 ? "" : "s"}`, value: roleLine(m), inline: false },
-      { name: "By event type", value: typeLines.length ? typeLines.join("\n").slice(0, 1024) : "Nothing logged yet this month.", inline: false }
-    ];
+    if (!r.person) return editReply(env, i, `You aren't on the roster under your Discord name (**${u.username}**). Use **/link** to connect your account, or ask to have your roster entry updated.`);
+    const n = x => Number(x) || 0, P = r.person, m = r.month || {}, w = r.week || {}, t = r.totals || null;
+    const isWorker = P.sheet === "Worker";
+    const link = profileUrl(env, P.emp);
+
+    // Who: rank, roster, employee number, clearance, time at rank.
+    const since = r.rankSince && r.rankSince.at ? Date.parse(r.rankSince.at) : 0;
+    const days = since ? Math.floor((Date.now() - since) / 86400000) : null;
+    const desc = ["**" + (P.rank || "No rank") + "**" + (P.sheet ? " · " + P.sheet : ""),
+      [P.emp ? "Employee No. " + P.emp : "", P.clearance ? "Clearance " + P.clearance : "",
+       since ? (r.rankSince.known === 0 ? "At this rank since at least " : "At this rank since ") + `<t:${ts(since)}:D> (${days === 1 ? "1 day" : days + " days"})` : ""].filter(Boolean).join(" · ")];
+    if (r.loa === "ACTIVE") desc.push("🟦 On leave of absence");
+
+    // This month, as stat tiles.
+    const tile = (name, v) => ({ name, value: "**" + v + "**", inline: true });
+    const fields = [tile("Events · " + r.monthLabel, n(r.events))];
+    if (!isWorker) fields.push(tile("Hosted", n(m.Host)));
+    fields.push(tile("Co-hosted", n(m["Co-host"])));
+    if (!isWorker) fields.push(tile("Supervised", n(m.Supervisor)));
+    fields.push(tile("Attended", n(m.Attendee)));
+    if (r.market) fields.push(tile("Market points", r.market.infinite ? "∞" : n(r.market.points).toLocaleString("en-GB")));
+    while (fields.length % 3) fields.push({ name: "​", value: "​", inline: true });
+
+    // Weekly quota (Management).
     if (r.quota) {
-      const credit = n(w.Host) + n(w["Co-host"]) + n(w.Supervisor);
+      const now = new Date(), d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 6));
+      d.setUTCDate(d.getUTCDate() + ((8 - d.getUTCDay()) % 7 || (now >= d ? 7 : 0)));
+      const done = [n(w.Host) && n(w.Host) + " hosted", n(w["Co-host"]) && n(w["Co-host"]) + " co-hosted", n(w.Supervisor) && n(w.Supervisor) + " supervised"].filter(Boolean);
       let q;
-      if (r.quota.exempt) q = "Exempt this week" + (r.loa === "ACTIVE" ? " (on LOA)" : "");
-      else if (r.quota.tick || credit > 0) q = "**Met this week:** " + [n(w.Host) && `${n(w.Host)} hosted`, n(w["Co-host"]) && `${n(w["Co-host"])} co-hosted`, n(w.Supervisor) && `${n(w.Supervisor)} supervised`].filter(Boolean).join(", ");
-      else q = "**Not met yet this week.** Host, co-host or supervise an event before Monday 06:00 UTC.";
-      if (r.quota.status) q += `\nLast week: **${r.quota.status}**`;
+      if (r.quota.exempt) q = "⚪ **Exempt this week**" + (r.loa === "ACTIVE" ? " (on LOA)" : "");
+      else if (r.quota.tick || done.length) q = "✅ **Met** · " + (done.join(", ") || "recorded on the roster");
+      else q = `⚠️ **Not met yet.** Host, co-host or supervise an event before <t:${ts(d.getTime())}:F> (<t:${ts(d.getTime())}:R>).`;
+      if (r.quota.status) q += "\nLast week: **" + r.quota.status.charAt(0) + r.quota.status.slice(1).toLowerCase() + "**";
       fields.push({ name: "Weekly quota", value: q.slice(0, 1024), inline: false });
     }
-    if (r.loa !== null && r.loa !== undefined) fields.push({ name: "LOA", value: r.loa === "ACTIVE" ? "On LOA" : "Not on LOA", inline: true });
-    if (r.market) fields.push({ name: "Market points", value: r.market.infinite ? "∞" : `**${n(r.market.points)}**`, inline: true });
-    await editReply(env, i, "", [{
-      author: { name: CONFIG.NAME },
-      title: r.person.name,
-      description: `${r.person.rank || "—"}${r.person.sheet ? " · " + r.person.sheet : ""}`,
-      color: CONFIG.COLOURS.info || CONFIG.COLOURS.approved,
-      fields: fields,
-      footer: { text: "Only you can see this · months start on the 1st, weeks on Monday (06:00 UTC)" },
+    // Next rank.
+    const pr = promotionText(r.promotion);
+    if (pr) fields.push({ name: "Promotion progress · next rank: " + r.promotion.next, value: pr, inline: false });
+    // This month by event type.
+    const tt = typeTable(r.byType, isWorker);
+    fields.push({ name: "This month by event type", value: tt || "Nothing logged yet this month.", inline: false });
+    // All time.
+    if (t) fields.push({ name: "All-time record", value: ["attended", "cohosted"].concat(isWorker ? [] : ["hosted", "supervised"])
+      .map(f => "**" + n(t[f]).toLocaleString("en-GB") + "** " + STAT_LABEL[f].toLowerCase()).join(" · "), inline: false });
+
+    const avatar = await robloxHeadshot(P.roblox || P.name).catch(() => "");
+    const embed = {
+      author: { name: CONFIG.NAME + " · Personal statistics" },
+      title: P.name, url: link || undefined, description: desc.join("\n"),
+      color: r.promotion && r.promotion.eligible ? CONFIG.COLOURS.approved : (CONFIG.COLOURS.info || CONFIG.COLOURS.approved),
+      thumbnail: avatar ? { url: avatar } : undefined, fields,
+      footer: { text: "Only you can see this · Months start on the 1st and weeks on Monday, 06:00 UTC" },
       timestamp: new Date().toISOString()
-    }]);
+    };
+    const components = link ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open full profile", url: link }] }] : [];
+    await editOriginal(env, i, { content: "", embeds: [embed], components, allowed_mentions: NO_PINGS });
+
+    // Then the website profile picture, if the screenshot service is set up.
+    const shot = await profileShot(env, P.emp).catch(err => { console.warn("Profile screenshot: " + err.message); return null; });
+    if (shot) {
+      embed.image = { url: "attachment://profile.png" };
+      embed.footer.text = "Only you can see this · Profile picture from the website, taken " + (shot.at ? new Date(shot.at).toUTCString().slice(17, 22) + " UTC" : "just now");
+      await discordFiles(env, "PATCH", `/webhooks/${CONFIG.APP_ID}/${i.token}/messages/@original`,
+        { embeds: [embed], components, attachments: [{ id: 0, filename: "profile.png" }], allowed_mentions: NO_PINGS }, [shot]).catch(err => console.warn("Profile picture upload: " + err.message));
+    }
   } catch (err) {
     await editReply(env, i, "Couldn't load your stats: " + err.message).catch(() => {});
   }
@@ -3157,7 +3248,7 @@ const COMMUNITY_COMMANDS = [
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
   { name: "leaderboard", description: "This month's top hosts and attendees", dm_permission: false, options: [
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
-  { name: "mystats", description: "Your month so far: events by type, quota, LOA and Market points (only you see it)", dm_permission: false },
+  { name: "mystats", description: "Your stats: this month, weekly quota, promotion progress and your website profile (only you see it)", dm_permission: false },
   { name: "link", description: "Link to your roster entry and get your rank, department, award and staff roles", dm_permission: false, options: [
     { type: 3, name: "name", description: "First time: pick your roster name. Already linked: leave empty to update your roles", required: false, autocomplete: true, max_length: 60 }] },
   { name: "roster", description: "Apply to be rostered, or update your rank / details", dm_permission: false, options: [
