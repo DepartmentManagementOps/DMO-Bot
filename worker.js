@@ -59,7 +59,7 @@ const CONFIG = {
   HQ_URL: "",                   // the HQ site's public API, e.g. https://rna-hq.pages.dev/api/public (reads ?api=events, profile, hqroster, home, market)
   HQ_PROFILE_URL: "",           // someone's HQ profile page; {emp} = their employee #, e.g. "https://…/exec?page=profile&emp={emp}"
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
-  SELFTEST_CHANNEL_ID: "",      // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
+  SELFTEST_CHANNEL_ID: "1554670493993271386",   // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
   MARKET_LOG_CHANNEL_ID: "",    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
   EVENT_PING_ROLE_ID: "",       // role pinged on event announcements/reminders ("" = no ping)
   ANNOUNCE_CHANNEL_ID: "",      // promotion posts + the HQ announcement mirror
