@@ -3656,7 +3656,7 @@ async function marketComponent(env, i) {
 // something is wrong (in the approval-logs channel). Run it any time: /selftest?key=REGISTER_KEY.
 // ---------------------------------------------------------------------
 async function selfTest(env) {
-  const checks = [];
+  const checks = [], facts = [];
   const add = (name, state, detail) => checks.push({ name, state, detail: String(detail || "") });   // state: ok | warn | fail
   const tryStep = async (name, fn) => { try { await fn(); } catch (e) { add(name, "fail", e.message || e); } };
   const ago = iso => iso ? Math.round((Date.now() - Date.parse(iso)) / 60000) : null;
@@ -3674,6 +3674,7 @@ async function selfTest(env) {
     if (!r.ok) throw new Error(/Not allowed/i.test(r.error || "") ? "the website refused the shared secret (SHEETS_SECRET)" : r.error);
     names = (r.people || []).length;
     add("Bot to website", names ? "ok" : "warn", names ? names + (names === 1 ? " person" : " people") + " on the roster" : "the roster came back empty");
+    if (names) facts.push(names + " on the roster");
   });
   await tryStep("Public HQ pages", async () => {
     const ev = await hq(env, "events", null, true);
@@ -3690,13 +3691,16 @@ async function selfTest(env) {
     add("Database", site.db && site.db.ok ? "ok" : "fail", site.db && site.db.ok ? "read and write work" : (site.db && site.db.error) || "write check failed");
     const p = site.botPing || {};
     add("Website to bot", p.ok ? "ok" : "fail", p.ok ? "reached in " + p.ms + " ms (" + p.via + ")" : (p.error || "no answer") + ". Results and DMs won't arrive until this is fixed.");
+    if (p.ok) facts.push("website to bot " + p.ms + " ms");
     const q = site.queue || {};
     const qProblems = [];
-    if (q.stuck) qProblems.push(q.stuck + " stuck in Processing");
-    if (q.approvedWaiting) qProblems.push(q.approvedWaiting + " approved in Discord but not carried out after 15 minutes");
-    if (q.errors) qProblems.push(q.errors + " in Error (press Retry on the Approvals page)");
-    if (q.pendingOld) qProblems.push(q.pendingOld + " waiting more than 24 hours");
+    const reqs = k => k + (k === 1 ? " request has" : " requests have");
+    if (q.stuck) qProblems.push(reqs(q.stuck) + " been stuck in Processing for over 10 minutes");
+    if (q.approvedWaiting) qProblems.push(reqs(q.approvedWaiting) + " been approved but not carried out after 15 minutes");
+    if (q.errors) qProblems.push(q.errors + (q.errors === 1 ? " request is" : " requests are") + " in Error; press Retry on the Approvals page");
+    if (q.pendingOld) qProblems.push(reqs(q.pendingOld) + " been waiting more than 24 hours");
     add("Approvals queue", q.stuck || q.approvedWaiting ? "fail" : qProblems.length ? "warn" : "ok", qProblems.length ? qProblems.join("; ") : (q.pending || 0) + " waiting, nothing stuck");
+    facts.push((q.pending || 0) + " awaiting approval");
     const st = site.settings || {};
     if (st.approvalsPaused || st.frozen) add("Roster settings", "warn", [st.approvalsPaused && "approvals are paused", st.frozen && "the roster is frozen for changes"].filter(Boolean).join("; "));
     const j = site.jobs || {}, aj = ago(j.approvals), dj = ago(j.daily);
@@ -3716,6 +3720,7 @@ async function selfTest(env) {
     const n = Object.keys(plan.managed).length;
     if (plan.tooHigh.length) add("Discord roles", "fail", plan.tooHigh.length + " roles are above the bot's role, so it can't give them: " + plan.tooHigh.slice(0, 8).join(", "));
     else add("Discord roles", n ? "ok" : "warn", n ? n + " roles managed, none above the bot" : "no server roles match the roster");
+    if (n) facts.push(n + " roles managed");
   });
   await tryStep("Slash commands", async () => {
     const want = ["lookup"].concat(Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => REQUESTS[k].command), COMMUNITY_COMMANDS.map(c => c.name));
@@ -3725,27 +3730,43 @@ async function selfTest(env) {
   });
 
   // 5. role updates over the last week
+  // Newest first; only failures since the last successful update count (older ones have been fixed since).
   const recent = (await kvGet(env, "state:lastroles", []) || []).filter(x => Date.now() - Date.parse(x.at) < 7 * 86400000);
-  const errs = recent.filter(x => /^ERROR/.test(x.result));
-  add("Role updates", errs.length ? "warn" : "ok", errs.length ? errs.length + " of " + recent.length + " failed this week, latest: " + errs[0].result.replace(/^ERROR: /, "") : recent.length + " this week, none failed");
+  const lastOk = recent.findIndex(x => !/^ERROR/.test(x.result));
+  const errs = (lastOk === -1 ? recent : recent.slice(0, lastOk)).filter(x => /^ERROR/.test(x.result));
+  add("Role updates", errs.length ? "warn" : "ok", errs.length
+    ? errs.length + (errs.length === 1 ? " failure" : " failures") + " since the last successful update, latest: " + errs[0].result.replace(/^ERROR: /, "")
+    : recent.length ? "working; the latest update succeeded" : "none this week");
 
-  return { at: new Date().toISOString(), checks, fails: checks.filter(c => c.state === "fail").length, warns: checks.filter(c => c.state === "warn").length };
+  return { at: new Date().toISOString(), checks, facts, fails: checks.filter(c => c.state === "fail").length, warns: checks.filter(c => c.state === "warn").length };
 }
-const ST_ICON = { ok: "✅", warn: "⚠️", fail: "❌" };
+const sentence = s => { s = String(s || "").trim(); return s ? s.charAt(0).toUpperCase() + s.slice(1) + (/[.!?]$/.test(s) ? "" : ".") : ""; };
 function selfTestSummary(r) {
-  return r.fails ? `${r.fails} problem${r.fails === 1 ? "" : "s"} found` + (r.warns ? `, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : "")
-    : r.warns ? `All working, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : `All ${r.checks.length} checks passed`;
+  const n = (k, one, many) => k + " " + (k === 1 ? one : many);
+  if (r.fails) return n(r.fails, "problem", "problems") + " found" + (r.warns ? ", and " + n(r.warns, "item needs", "items need") + " attention." : ".");
+  if (r.warns) return "Everything is working. " + n(r.warns, "item needs", "items need") + " attention.";
+  return "Everything is working.";
+}
+function selfTestSections(r, bullet) {
+  const by = s => r.checks.filter(c => c.state === s);
+  const out = [];
+  if (by("fail").length) out.push({ title: "Not working", lines: by("fail").map(c => bullet + c.name + ": " + sentence(c.detail)) });
+  if (by("warn").length) out.push({ title: "Needs attention", lines: by("warn").map(c => bullet + c.name + ": " + sentence(c.detail)) });
+  if (by("ok").length) out.push({ title: "Working normally", lines: [by("ok").map(c => c.name).join(" · ")] });
+  return out;
 }
 function selfTestText(r) {
-  return "Self-test, " + r.at + "\n" + selfTestSummary(r) + "\n\n" + r.checks.map(c => `${ST_ICON[c.state]} ${c.name}: ${c.detail}`).join("\n");
+  return ["System check, " + r.at.replace("T", " ").slice(0, 16) + " UTC", selfTestSummary(r), ""]
+    .concat(...selfTestSections(r, "- ").map(s => [s.title, ...s.lines, ""]), (r.facts || []).length ? [r.facts.join(" · ")] : []).join("\n");
 }
 async function postSelfTest(env, r, always) {
   const channel = CONFIG.SELFTEST_CHANNEL_ID || ((r.fails || r.warns) ? CONFIG.APPROVAL_CHANNEL_ID : "");
   if (!channel || (!always && !CONFIG.SELFTEST_CHANNEL_ID && !r.fails && !r.warns)) return;
+  const body = [selfTestSummary(r)].concat(...selfTestSections(r, "• ").map(s => ["", "**" + s.title + "**", ...s.lines]));
+  if ((r.facts || []).length) body.push("", "-# " + r.facts.join(" · "));
   await discord(env, "POST", `/channels/${channel}/messages`, { allowed_mentions: NO_PINGS, embeds: [{
     author: { name: CONFIG.NAME }, color: r.fails ? CONFIG.COLOURS.denied : r.warns ? CONFIG.COLOURS.pending : CONFIG.COLOURS.approved,
-    title: "Weekly self-test: " + selfTestSummary(r),
-    description: r.checks.map(c => `${ST_ICON[c.state]} **${c.name}:** ${c.detail}`).join("\n").slice(0, 4000),
+    title: "Weekly system check", description: body.join("\n").slice(0, 4000),
     footer: { text: "Runs every Sunday at 18:00 UTC" }, timestamp: r.at }] });
 }
 async function cronSelfTest(env, now) {
