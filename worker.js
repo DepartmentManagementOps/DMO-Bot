@@ -59,7 +59,7 @@ const CONFIG = {
   HQ_URL: "",                   // the HQ site's public API, e.g. https://rna-hq.pages.dev/api/public (reads ?api=events, profile, hqroster, home, market)
   HQ_PROFILE_URL: "",           // someone's HQ profile page; {emp} = their employee #, e.g. "https://…/exec?page=profile&emp={emp}"
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
-  MARKET_LOG_CHANNEL_ID: "",    // where /market purchases are posted for staff ("" = not posted)
+  MARKET_LOG_CHANNEL_ID: "",    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
   EVENT_PING_ROLE_ID: "",       // role pinged on event announcements/reminders ("" = no ping)
   ANNOUNCE_CHANNEL_ID: "",      // promotion posts + the HQ announcement mirror
   DIGEST_CHANNEL_ID: "",        // Monday digest ("" = ANNOUNCE_CHANNEL_ID)
@@ -826,7 +826,7 @@ async function sendRequest(env, i, type, st, att) {
 }
 
 function requestChannel(type) {
-  return (CONFIG.REQUEST_CHANNELS || {})[type] || CONFIG.REQUEST_CHANNEL_ID || CONFIG.APPROVAL_CHANNEL_ID;
+  return (CONFIG.REQUEST_CHANNELS || {})[type] || (type === "market" && CONFIG.MARKET_LOG_CHANNEL_ID) || CONFIG.REQUEST_CHANNEL_ID || CONFIG.APPROVAL_CHANNEL_ID;
 }
 
 // What the roster needs to carry the request out when it's approved.
@@ -848,7 +848,7 @@ function requestDetails(type, st, u) {
 // Decisions on the roster's Approvals page -> the request message + a DM.
 async function syncRequest(env, b) {
   const type = String(b.id).split("-")[0];
-  const t = REQUESTS[type] || { title: "Request" };
+  const t = REQUESTS[type] || { title: type === "market" ? "Market Purchase" : "Request" };
   const path = `/channels/${requestChannel(type)}/messages/${String(b.id).replace(/\D/g, "")}`;
   const who = String(b.by || "a roster editor").replace(/@.*$/, "");
   let row = null, dmText = null, colour = CONFIG.COLOURS.approved;
@@ -859,7 +859,8 @@ async function syncRequest(env, b) {
     row = statusRow(`Approved by ${who}`, "✅");
     dmText = `Your ${t.title} was approved by ${who}.` + (b.note ? `\n-# ${String(b.note).slice(0, 300)}` : "");
   }
-  if (b.status === "Error") row = statusRow(`Approved, but not added to the roster yet (${String(b.note || "error").slice(0, 30)})`, "⚠️");
+  if (b.status === "Error") row = statusRow(type === "market" ? `Approved, but the purchase failed (${String(b.note || "error").slice(0, 34)})`
+    : `Approved, but not added to the roster yet (${String(b.note || "error").slice(0, 30)})`, "⚠️");
   if (b.status === "Denied") {
     row = statusRow(`Denied by ${who}`, "✖️");
     colour = CONFIG.COLOURS.denied;
@@ -2300,7 +2301,7 @@ async function claimAction(env, i, kind, release) {
 
 function requestDecisionAction(env, ctx, i) {
   const [, act, kind, claimer] = i.data.custom_id.split(":");
-  if (!REQUESTS[kind] && kind !== "event") return reply("Unknown request type.");
+  if (!REQUESTS[kind] && kind !== "event" && kind !== "market") return reply("Unknown request type.");
   // Known not allowed -> say so now. Unknown -> carry on; it's checked before anything is recorded.
   const known = cachedReviewer(caller(i).id);
   if (known && !mayDecide(known, kind)) return reply(decideReason(known, kind));
@@ -2313,7 +2314,7 @@ function requestDecisionAction(env, ctx, i) {
   if (!claimer) return { type: R.UPDATE, data: { components: [decisionRow(kind)] } };
   if (claimer === "web") return reply("This was claimed on the roster's Approvals page. It must be decided there, or released first.");
   if (claimer !== caller(i).id) return reply(`Claimed by <@${claimer}>. Only they can approve or deny it. Claims expire after 30 minutes; you can then press **Release** and claim it yourself.`);
-  const title = kind === "event" ? "event log" : REQUESTS[kind].title;
+  const title = kind === "event" ? "event log" : kind === "market" ? "Market purchase" : REQUESTS[kind].title;
   const box = (id, label, style, max, placeholder, value, required) => ({ type: 18, label: label, component: Object.assign(
     { type: 4, custom_id: id, style: style, max_length: max, required: required !== false, placeholder: placeholder }, value ? { value: value } : {}) });
   if (act === "no") {
@@ -3120,7 +3121,7 @@ async function handleCommunity(i, env, ctx) {
 
 // The new slash commands (added to the list in registerCommands).
 const COMMUNITY_COMMANDS = [
-  { name: "market", description: "See the Market and spend your points (Management+)", dm_permission: false },
+  { name: "market", description: "See the Market and request a purchase with your points (Management+)", dm_permission: false },
   { name: "event", description: "Events: log one for approval, or schedule, cancel and list HQ events", dm_permission: false, options: [
     { type: 1, name: "schedule", description: "Schedule an event (Management+)", options: [
       { type: 3, name: "title", description: "Event name", required: true, max_length: 100 },
@@ -3547,25 +3548,27 @@ const mkPoints = (r) => r.infinite ? "∞" : String(r.points || 0);
 function marketView(r) {
   const lines = [];
   if (!r.eligible) lines.push(r.reason);
-  else lines.push(`You have **${mkPoints(r)}** point${r.points === 1 && !r.infinite ? "" : "s"}.`);
+  else lines.push(`You have **${mkPoints(r)}** point${r.points === 1 && !r.infinite ? "" : "s"}` + (r.waitingCost && !r.infinite ? `, ${r.waitingCost} of them in requests waiting for approval.` : "."));
   if (r.frozen) lines.push("Purchases are paused while the roster is frozen for changes.");
   lines.push("");
   (r.items || []).forEach(x => {
     const notes = [];
     if (!x.available) notes.push("unavailable");
     else if (x.cooldownUntil) notes.push(`you can buy again <t:${ts(Date.parse(x.cooldownUntil))}:D>`);
+    else if (x.requested) notes.push("request waiting");
     lines.push(`**${x.name}** · ${x.cost} points · ${x.lasts}${x.cooldown ? " · cooldown " + x.cooldown : ""}${notes.length ? ` (${notes.join(", ")})` : ""}` +
       (x.description ? `\n-# ${cleanLine(x.description, 180)}` : ""));
   });
   if (!(r.items || []).length) lines.push("The shop is empty.");
   const fields = [];
+  if ((r.waiting || []).length) fields.push({ name: "Waiting for approval", inline: false, value: r.waiting.map(w => `• ${w.item}, ${w.cost} points`).join("\n").slice(0, 1024) });
   if ((r.mine || []).length) fields.push({ name: "Your purchases", inline: false, value: r.mine.map(m =>
     `• ${m.item}, bought <t:${ts(Date.parse(m.bought))}:D>` + (m.ends ? ` · active until <t:${ts(Date.parse(m.ends))}:D>` : "") +
     (m.cooldownEnds ? ` · cooldown until <t:${ts(Date.parse(m.cooldownEnds))}:D>` : "")).join("\n").slice(0, 1024) });
-  const canBuy = r.eligible && !r.frozen ? (r.items || []).filter(x => x.available && !x.cooldownUntil && (r.infinite || (r.points || 0) >= x.cost)) : [];
-  const components = canBuy.length ? [{ type: 1, components: [{ type: 3, custom_id: "mk:pick", placeholder: "Choose an item to buy",
+  const canBuy = r.eligible && !r.frozen ? (r.items || []).filter(x => x.available && !x.cooldownUntil && !x.requested && (r.infinite || (r.points || 0) - (r.waitingCost || 0) >= x.cost)) : [];
+  const components = canBuy.length ? [{ type: 1, components: [{ type: 3, custom_id: "mk:pick", placeholder: "Choose an item to request",
     options: canBuy.slice(0, 25).map(x => ({ label: x.name.slice(0, 100), value: x.name.slice(0, 100), description: (x.cost + " points · " + x.lasts).slice(0, 100) })) }] }] : [];
-  if (r.eligible && !r.frozen && !canBuy.length && (r.items || []).length) lines.push("", "-# Nothing you can buy right now: not enough points, unavailable, or on cooldown.");
+  if (r.eligible && !r.frozen && !canBuy.length && (r.items || []).length) lines.push("", "-# Nothing you can request right now: not enough points, unavailable, on cooldown or already requested.");
   return { content: "", embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: "Market", description: lines.join("\n").slice(0, 4000),
     fields, footer: { text: "Only you can see this" } }], components, allowed_mentions: NO_PINGS };
 }
@@ -3598,34 +3601,38 @@ async function marketComponent(env, i) {
       if (!r.ok || !r.person) throw new Error(r.error || "the roster didn't answer");
       const x = (r.items || []).find(it => it.name.slice(0, 100) === name);
       if (!x) return editOriginal(env, i, Object.assign(marketView(r), { content: "That item isn't in the shop any more." }));
-      const after = r.infinite ? "∞" : String((r.points || 0) - x.cost);
-      return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "Confirm purchase",
+      const after = r.infinite ? "∞" : String((r.points || 0) - (r.waitingCost || 0) - x.cost);
+      return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "Request this purchase?",
         description: x.description ? cleanLine(x.description, 1000) : "",
         fields: [{ name: "Item", value: x.name, inline: true }, { name: "Cost", value: x.cost + " points", inline: true },
-          { name: "Points after", value: after, inline: true }, { name: "Lasts", value: x.lasts, inline: true },
+          { name: "Points after approval", value: after, inline: true }, { name: "Lasts", value: x.lasts, inline: true },
           { name: "Cooldown", value: x.cooldown || "None", inline: true }],
-        footer: { text: "Only you can see this" } }],
-        components: [{ type: 1, components: [{ type: 2, style: 3, label: "Buy", custom_id: "mk:buy" }, { type: 2, style: 2, label: "Back", custom_id: "mk:back" }] }] });
+        footer: { text: "DMO approve purchases. Points are only taken once it's approved." } }],
+        components: [{ type: 1, components: [{ type: 2, style: 3, label: "Request purchase", custom_id: "mk:buy" }, { type: 2, style: 2, label: "Back", custom_id: "mk:back" }] }] });
     }
     if (id === "mk:buy") {
+      // Sent for approval: nothing is taken until DMO approve it (here or on the roster's Approvals page).
       const e = (i.message.embeds || [])[0] || {};
       const item = ((e.fields || []).find(f => f.name === "Item") || {}).value || "";
       const u = caller(i);
-      const res = await bridge(env, { action: "marketBuy", byId: u.id, byName: u.username || "", item });
-      if (!res.ok) return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.denied,
-        title: "Purchase not made", description: res.error || "The roster didn't answer." }],
+      const fail = (msg) => editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.denied,
+        title: "Request not sent", description: msg || "The roster didn't answer." }],
         components: [{ type: 1, components: [{ type: 2, style: 2, label: "Back to the Market", custom_id: "mk:back" }] }] });
-      const fields = [{ name: "Item", value: res.item, inline: true }, { name: "Cost", value: res.cost + " points", inline: true },
-        { name: "Points left", value: res.infinite ? "∞" : String(res.after), inline: true },
-        { name: "Active until", value: res.ends ? `<t:${ts(Date.parse(res.ends))}:D>` : "Permanent", inline: true }];
-      if (res.cooldownEnds) fields.push({ name: "Can buy again", value: `<t:${ts(Date.parse(res.cooldownEnds))}:D>`, inline: true });
-      await editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.approved,
-        title: "Purchase complete", description: "It's recorded on the roster's Market.", fields, footer: { text: "Only you can see this" } }], components: [] });
-      if (CONFIG.MARKET_LOG_CHANNEL_ID) {
-        await discord(env, "POST", `/channels/${CONFIG.MARKET_LOG_CHANNEL_ID}/messages`, { allowed_mentions: NO_PINGS,
-          content: `<@${u.id}> (${res.buyer}) bought **${res.item}** for ${res.cost} points.` + (res.ends ? ` Active until <t:${ts(Date.parse(res.ends))}:D>.` : "") }).catch(() => {});
+      const chk = await bridge(env, { action: "marketCheck", byId: u.id, byName: u.username || "", item });
+      if (!chk.ok) return fail(chk.error);
+      const content = ["**Market Purchase**", `Discord Username: ${u.username} (<@${u.id}>)`, `Roblox Username: ${chk.roblox || "—"}`,
+        `Item: ${chk.item}`, `Cost: ${chk.cost} points`, `Points: ${chk.infinite ? "∞" : chk.points + (chk.spoken ? ` (${chk.spoken} already requested)` : "")}`,
+        `Lasts: ${chk.lasts}` + (chk.cooldown ? ` · Cooldown: ${chk.cooldown}` : "")].join("\n");
+      const msg = await discord(env, "POST", `/channels/${requestChannel("market")}/messages`, { content, allowed_mentions: NO_PINGS, components: [decisionRow("market")] });
+      const q = await bridge(env, { action: "request", id: "market-" + msg.id, title: "Market Purchase", details: { item: chk.item },
+        submittedBy: callerName(i), submittedById: u.id, byName: u.username || "" }).catch(err => ({ ok: false, error: err.message }));
+      if (!q.ok) {
+        await discord(env, "DELETE", `/channels/${requestChannel("market")}/messages/${msg.id}`).catch(() => {});
+        return fail(q.error);
       }
-      return;
+      return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.approved,
+        title: "Purchase requested", description: `**${chk.item}** for ${chk.cost} points.\nDMO will review it here in Discord or on the roster's Approvals page. ` +
+          "Points are only taken once it's approved, and you'll get a DM with the outcome.", footer: { text: "Only you can see this" } }], components: [] });
     }
   } catch (err) {
     await followup(env, i, "Couldn't do that: " + err.message);
