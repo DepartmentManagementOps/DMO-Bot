@@ -59,6 +59,7 @@ const CONFIG = {
   HQ_URL: "",                   // the HQ site's public API, e.g. https://rna-hq.pages.dev/api/public (reads ?api=events, profile, hqroster, home, market)
   HQ_PROFILE_URL: "",           // someone's HQ profile page; {emp} = their employee #, e.g. "https://…/exec?page=profile&emp={emp}"
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
+  MARKET_LOG_CHANNEL_ID: "",    // where /market purchases are posted for staff ("" = not posted)
   EVENT_PING_ROLE_ID: "",       // role pinged on event announcements/reminders ("" = no ping)
   ANNOUNCE_CHANNEL_ID: "",      // promotion posts + the HQ announcement mirror
   DIGEST_CHANNEL_ID: "",        // Monday digest ("" = ANNOUNCE_CHANNEL_ID)
@@ -3104,6 +3105,7 @@ async function handleCommunity(i, env, ctx) {
     if (name === "profile") { ctx.waitUntil(profileCommand(env, i, o)); return deferred(o); }
     if (name === "leaderboard") { ctx.waitUntil(leaderboardCommand(env, i)); return deferred(o); }
     if (name === "mystats") { ctx.waitUntil(myStatsCommand(env, i)); return deferred(); }
+    if (name === "market") { ctx.waitUntil(marketCommand(env, i)); return deferred(); }
     if (name === "link") { ctx.waitUntil(linkCommand(env, i, o)); return deferred(); }
     if (name === "roster" && f.sub === "start") { ctx.waitUntil(rosterStart(env, i)); return deferred(); }
     if (name === "roster" && f.sub === "update") { ctx.waitUntil(openRequestPanel(env, i, "roster", { updateOnly: true })); return deferred(); }
@@ -3111,12 +3113,14 @@ async function handleCommunity(i, env, ctx) {
   }
 
   if (i.type === T.COMPONENT && /^rq:(yes|no|claim|release):/.test(i.data.custom_id)) return requestDecisionAction(env, ctx, i);
+  if (i.type === T.COMPONENT && /^mk:/.test(i.data.custom_id)) { ctx.waitUntil(marketComponent(env, i)); return { type: R.DEFER_UPDATE }; }
   if (i.type === T.MODAL_SUBMIT && /^rq:(noform:|loaform$)/.test(i.data.custom_id)) return requestDecisionSubmit(env, ctx, i);
   return null;
 }
 
 // The new slash commands (added to the list in registerCommands).
 const COMMUNITY_COMMANDS = [
+  { name: "market", description: "See the Market and spend your points (Management+)", dm_permission: false },
   { name: "event", description: "Events: log one for approval, or schedule, cancel and list HQ events", dm_permission: false, options: [
     { type: 1, name: "schedule", description: "Schedule an event (Management+)", options: [
       { type: 3, name: "title", description: "Event name", required: true, max_length: 100 },
@@ -3533,4 +3537,97 @@ async function registerCommands(env) {
   });
   return new Response(res.ok ? "Done. /lookup, " + Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => "/" + REQUESTS[k].command).join(", ") +
     ", " + COMMUNITY_COMMANDS.map(c => "/" + c.name).join(", ") + " are registered. They can take a minute to appear in Discord." : "Failed: " + (await res.text()), { status: res.ok ? 200 : 500 });
+}
+
+// ---------------------------------------------------------------------
+// /market: the shop, your points and purchases; buy with a confirm step.
+// The roster checks everything again when buying (stock, points, cooldown, Management+, edit freeze).
+// ---------------------------------------------------------------------
+const mkPoints = (r) => r.infinite ? "∞" : String(r.points || 0);
+function marketView(r) {
+  const lines = [];
+  if (!r.eligible) lines.push(r.reason);
+  else lines.push(`You have **${mkPoints(r)}** point${r.points === 1 && !r.infinite ? "" : "s"}.`);
+  if (r.frozen) lines.push("Purchases are paused while the roster is frozen for changes.");
+  lines.push("");
+  (r.items || []).forEach(x => {
+    const notes = [];
+    if (!x.available) notes.push("unavailable");
+    else if (x.cooldownUntil) notes.push(`you can buy again <t:${ts(Date.parse(x.cooldownUntil))}:D>`);
+    lines.push(`**${x.name}** · ${x.cost} points · ${x.lasts}${x.cooldown ? " · cooldown " + x.cooldown : ""}${notes.length ? ` (${notes.join(", ")})` : ""}` +
+      (x.description ? `\n-# ${cleanLine(x.description, 180)}` : ""));
+  });
+  if (!(r.items || []).length) lines.push("The shop is empty.");
+  const fields = [];
+  if ((r.mine || []).length) fields.push({ name: "Your purchases", inline: false, value: r.mine.map(m =>
+    `• ${m.item}, bought <t:${ts(Date.parse(m.bought))}:D>` + (m.ends ? ` · active until <t:${ts(Date.parse(m.ends))}:D>` : "") +
+    (m.cooldownEnds ? ` · cooldown until <t:${ts(Date.parse(m.cooldownEnds))}:D>` : "")).join("\n").slice(0, 1024) });
+  const canBuy = r.eligible && !r.frozen ? (r.items || []).filter(x => x.available && !x.cooldownUntil && (r.infinite || (r.points || 0) >= x.cost)) : [];
+  const components = canBuy.length ? [{ type: 1, components: [{ type: 3, custom_id: "mk:pick", placeholder: "Choose an item to buy",
+    options: canBuy.slice(0, 25).map(x => ({ label: x.name.slice(0, 100), value: x.name.slice(0, 100), description: (x.cost + " points · " + x.lasts).slice(0, 100) })) }] }] : [];
+  if (r.eligible && !r.frozen && !canBuy.length && (r.items || []).length) lines.push("", "-# Nothing you can buy right now: not enough points, unavailable, or on cooldown.");
+  return { content: "", embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: "Market", description: lines.join("\n").slice(0, 4000),
+    fields, footer: { text: "Only you can see this" } }], components, allowed_mentions: NO_PINGS };
+}
+async function marketInfoFor(env, i) {
+  const u = caller(i);
+  return bridge(env, { action: "marketInfo", byId: u.id, byName: u.username || "" });
+}
+async function marketCommand(env, i) {
+  try {
+    if (!linked(env)) return editReply(env, i, "The roster isn't linked yet.");
+    const r = await marketInfoFor(env, i);
+    if (!r.ok) throw new Error(r.error || "the roster didn't answer");
+    if (!r.person) return editReply(env, i, r.error || "You aren't on the roster under your Discord name.");
+    await editOriginal(env, i, marketView(r));
+  } catch (err) {
+    await editReply(env, i, "Couldn't open the Market: " + err.message).catch(() => {});
+  }
+}
+async function marketComponent(env, i) {
+  const id = i.data.custom_id;
+  try {
+    if (id === "mk:back") {
+      const r = await marketInfoFor(env, i);
+      if (!r.ok || !r.person) throw new Error(r.error || "the roster didn't answer");
+      return editOriginal(env, i, marketView(r));
+    }
+    if (id === "mk:pick") {
+      const name = ((i.data.values || [])[0] || "").trim();
+      const r = await marketInfoFor(env, i);
+      if (!r.ok || !r.person) throw new Error(r.error || "the roster didn't answer");
+      const x = (r.items || []).find(it => it.name.slice(0, 100) === name);
+      if (!x) return editOriginal(env, i, Object.assign(marketView(r), { content: "That item isn't in the shop any more." }));
+      const after = r.infinite ? "∞" : String((r.points || 0) - x.cost);
+      return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "Confirm purchase",
+        description: x.description ? cleanLine(x.description, 1000) : "",
+        fields: [{ name: "Item", value: x.name, inline: true }, { name: "Cost", value: x.cost + " points", inline: true },
+          { name: "Points after", value: after, inline: true }, { name: "Lasts", value: x.lasts, inline: true },
+          { name: "Cooldown", value: x.cooldown || "None", inline: true }],
+        footer: { text: "Only you can see this" } }],
+        components: [{ type: 1, components: [{ type: 2, style: 3, label: "Buy", custom_id: "mk:buy" }, { type: 2, style: 2, label: "Back", custom_id: "mk:back" }] }] });
+    }
+    if (id === "mk:buy") {
+      const e = (i.message.embeds || [])[0] || {};
+      const item = ((e.fields || []).find(f => f.name === "Item") || {}).value || "";
+      const u = caller(i);
+      const res = await bridge(env, { action: "marketBuy", byId: u.id, byName: u.username || "", item });
+      if (!res.ok) return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.denied,
+        title: "Purchase not made", description: res.error || "The roster didn't answer." }],
+        components: [{ type: 1, components: [{ type: 2, style: 2, label: "Back to the Market", custom_id: "mk:back" }] }] });
+      const fields = [{ name: "Item", value: res.item, inline: true }, { name: "Cost", value: res.cost + " points", inline: true },
+        { name: "Points left", value: res.infinite ? "∞" : String(res.after), inline: true },
+        { name: "Active until", value: res.ends ? `<t:${ts(Date.parse(res.ends))}:D>` : "Permanent", inline: true }];
+      if (res.cooldownEnds) fields.push({ name: "Can buy again", value: `<t:${ts(Date.parse(res.cooldownEnds))}:D>`, inline: true });
+      await editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.approved,
+        title: "Purchase complete", description: "It's recorded on the roster's Market.", fields, footer: { text: "Only you can see this" } }], components: [] });
+      if (CONFIG.MARKET_LOG_CHANNEL_ID) {
+        await discord(env, "POST", `/channels/${CONFIG.MARKET_LOG_CHANNEL_ID}/messages`, { allowed_mentions: NO_PINGS,
+          content: `<@${u.id}> (${res.buyer}) bought **${res.item}** for ${res.cost} points.` + (res.ends ? ` Active until <t:${ts(Date.parse(res.ends))}:D>.` : "") }).catch(() => {});
+      }
+      return;
+    }
+  } catch (err) {
+    await followup(env, i, "Couldn't do that: " + err.message);
+  }
 }
