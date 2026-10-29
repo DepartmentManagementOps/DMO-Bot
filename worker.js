@@ -142,7 +142,7 @@ export default {
       // and sending the DM can take longer — the work carries on after the answer (waitUntil).
       const work = (async () => {
         if (body.type === "score") await syncScore(env, body);
-        else if (/^(award|roster|loa)-/.test(String(body.id || ""))) await syncRequest(env, body);
+        else if (/^(award|roster|loa|market)-/.test(String(body.id || ""))) await syncRequest(env, body);
         else await syncFromRoster(env, body);
       })().catch(e => console.error("sync " + (body.id || "") + ": " + (e && e.stack || e)));
       ctx.waitUntil(work);
