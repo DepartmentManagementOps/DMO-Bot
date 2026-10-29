@@ -3657,7 +3657,7 @@ async function marketComponent(env, i) {
 // ---------------------------------------------------------------------
 async function selfTest(env) {
   const checks = [], facts = [];
-  const add = (name, state, detail) => checks.push({ name, state, detail: String(detail || "") });   // state: ok | warn | fail
+  const add = (name, state, detail, fix) => checks.push({ name, state, detail: String(detail || ""), fix: fix || "" });   // state: ok | warn | fail
   const tryStep = async (name, fn) => { try { await fn(); } catch (e) { add(name, "fail", e.message || e); } };
   const ago = iso => iso ? Math.round((Date.now() - Date.parse(iso)) / 60000) : null;
 
@@ -3674,7 +3674,7 @@ async function selfTest(env) {
     if (!r.ok) throw new Error(/Not allowed/i.test(r.error || "") ? "the website refused the shared secret (SHEETS_SECRET)" : r.error);
     names = (r.people || []).length;
     add("Bot to website", names ? "ok" : "warn", names ? names + (names === 1 ? " person" : " people") + " on the roster" : "the roster came back empty");
-    if (names) facts.push(names + " on the roster");
+    if (names) facts.push("Roster: " + names);
   });
   await tryStep("Public HQ pages", async () => {
     const ev = await hq(env, "events", null, true);
@@ -3690,17 +3690,19 @@ async function selfTest(env) {
   if (site && site.ok) {
     add("Database", site.db && site.db.ok ? "ok" : "fail", site.db && site.db.ok ? "read and write work" : (site.db && site.db.error) || "write check failed");
     const p = site.botPing || {};
-    add("Website to bot", p.ok ? "ok" : "fail", p.ok ? "reached in " + p.ms + " ms (" + p.via + ")" : (p.error || "no answer") + ". Results and DMs won't arrive until this is fixed.");
-    if (p.ok) facts.push("website to bot " + p.ms + " ms");
+    add("Website to bot", p.ok ? "ok" : "fail", p.ok ? "reached in " + p.ms + " ms (" + p.via + ")" : (p.error || "no answer"));
+    if (p.ok) facts.push("Website response: " + p.ms + " ms");
     const q = site.queue || {};
     const qProblems = [];
     const reqs = k => k + (k === 1 ? " request has" : " requests have");
     if (q.stuck) qProblems.push(reqs(q.stuck) + " been stuck in Processing for over 10 minutes");
     if (q.approvedWaiting) qProblems.push(reqs(q.approvedWaiting) + " been approved but not carried out after 15 minutes");
-    if (q.errors) qProblems.push(q.errors + (q.errors === 1 ? " request is" : " requests are") + " in Error; press Retry on the Approvals page");
+    if (q.errors) qProblems.push(q.errors + (q.errors === 1 ? " request is" : " requests are") + " in Error");
     if (q.pendingOld) qProblems.push(reqs(q.pendingOld) + " been waiting more than 24 hours");
-    add("Approvals queue", q.stuck || q.approvedWaiting ? "fail" : qProblems.length ? "warn" : "ok", qProblems.length ? qProblems.join("; ") : (q.pending || 0) + " waiting, nothing stuck");
-    facts.push((q.pending || 0) + " awaiting approval");
+    add("Approvals queue", q.stuck || q.approvedWaiting ? "fail" : qProblems.length ? "warn" : "ok", qProblems.length ? qProblems.join("; ") : (q.pending || 0) + " waiting, nothing stuck",
+      [q.stuck || q.approvedWaiting || q.errors ? "On the website's Approvals page, open the requests in Processing or Error and press Retry, and check approvals aren't paused in Settings" : "",
+       q.pendingOld ? "Decide the requests waiting longest on the Approvals page" : ""].filter(Boolean).join(". "));
+    facts.push("Awaiting approval: " + (q.pending || 0));
     const st = site.settings || {};
     if (st.approvalsPaused || st.frozen) add("Roster settings", "warn", [st.approvalsPaused && "approvals are paused", st.frozen && "the roster is frozen for changes"].filter(Boolean).join("; "));
     const j = site.jobs || {}, aj = ago(j.approvals), dj = ago(j.daily);
@@ -3720,13 +3722,13 @@ async function selfTest(env) {
     const n = Object.keys(plan.managed).length;
     if (plan.tooHigh.length) add("Discord roles", "fail", plan.tooHigh.length + " roles are above the bot's role, so it can't give them: " + plan.tooHigh.slice(0, 8).join(", "));
     else add("Discord roles", n ? "ok" : "warn", n ? n + " roles managed, none above the bot" : "no server roles match the roster");
-    if (n) facts.push(n + " roles managed");
+    if (n) facts.push("Roles managed: " + n);
   });
   await tryStep("Slash commands", async () => {
     const want = ["lookup"].concat(Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => REQUESTS[k].command), COMMUNITY_COMMANDS.map(c => c.name));
     const have = (await discord(env, "GET", `/applications/${CONFIG.APP_ID}/commands`)).map(c => c.name);
     const gone = want.filter(n => have.indexOf(n) === -1);
-    add("Slash commands", gone.length ? "warn" : "ok", gone.length ? "not registered: /" + gone.join(", /") + ". Open /register?key=… once." : want.length + " registered");
+    add("Slash commands", gone.length ? "warn" : "ok", gone.length ? "not registered: /" + gone.join(", /") : want.length + " registered");
   });
 
   // 5. role updates over the last week
@@ -3741,33 +3743,82 @@ async function selfTest(env) {
   return { at: new Date().toISOString(), checks, facts, fails: checks.filter(c => c.state === "fail").length, warns: checks.filter(c => c.state === "warn").length };
 }
 const sentence = s => { s = String(s || "").trim(); return s ? s.charAt(0).toUpperCase() + s.slice(1) + (/[.!?]$/.test(s) ? "" : ".") : ""; };
-function selfTestSummary(r) {
-  const n = (k, one, many) => k + " " + (k === 1 ? one : many);
-  if (r.fails) return n(r.fails, "problem", "problems") + " found" + (r.warns ? ", and " + n(r.warns, "item needs", "items need") + " attention." : ".");
-  if (r.warns) return "Everything is working. " + n(r.warns, "item needs", "items need") + " attention.";
-  return "Everything is working.";
+// What each check covers: its group in the report, what breaks when it fails, and the usual fix.
+const SELFTEST_GUIDE = {
+  "Bot settings":            ["Connections", "The bot can't start parts of its work without these.", "Add the missing values in Cloudflare: dmo-bot ▸ Settings ▸ Variables and secrets (KV and IDs in wrangler.toml / CONFIG)."],
+  "Bot to website":          ["Connections", "Lookups, logs and requests made in Discord fail.", "Check SHEETS_URL in wrangler.toml is https://<site>/api/bot, and that SHEETS_SECRET matches the website's APPROVAL_SECRET."],
+  "Public HQ pages":         ["Connections", "/events and HQ-based lookups fail.", "Check HQ_URL in wrangler.toml is https://<site>/api/public and that the site's latest deployment succeeded."],
+  "Website self-check":      ["Connections", "The database, approvals and website jobs couldn't be checked.", "Check the latest deployment and its logs on the Pages project (rna-hq)."],
+  "Website to bot":          ["Connections", "Decisions made on the website don't update Discord, give roles or send DMs.", "On the Pages project, check the BOT_URL variable and the BOT service binding, then retry the latest deployment."],
+  "Database":                ["Website", "Nothing can be saved to the roster.", "Check the DB binding on the Pages project and the D1 database \"hq\" in Cloudflare."],
+  "Roster settings":         ["Website", "Approved requests aren't carried out while this is on.", "Turn it off in the website's Settings when ready."],
+  "Website background jobs": ["Website", "Approved requests and daily updates are delayed.", "Jobs run when the site gets traffic: open the site and the Approvals page. If this stays, check the Pages logs."],
+  "Approvals queue":         ["Approvals and roles", "Members are left waiting for points, awards, LOAs or roster changes.", "Decide the oldest requests on the website's Approvals page."],
+  "Role updates":            ["Approvals and roles", "Some members may have missing or out-of-date roles.", "Check the error shown. Most often the member isn't linked yet or a role sits above the bot's role."],
+  "Discord channels":        ["Discord", "Logs, requests or reports can't be posted there.", "Give the bot View Channel and Send Messages in those channels, or correct the channel IDs in CONFIG."],
+  "Discord roles":           ["Discord", "Those roles can't be given or removed.", "Server Settings ▸ Roles: drag the bot's role above them."],
+  "Slash commands":          ["Discord", "Members can't use the missing commands.", "Open /register?key=REGISTER_KEY on the bot once."],
+};
+const SELFTEST_GROUPS = ["Connections", "Website", "Approvals and roles", "Discord"];
+const SELFTEST_STATE = { fail: ["🔴", "Critical", "Not working"], warn: ["🟡", "Warning", "Needs attention"], ok: ["🟢", "OK", "Operational"] };
+function selfTestOverall(r) {
+  const n = (k, w) => k + " " + w + (k === 1 ? "" : "s");
+  if (r.fails) return { icon: "🔴", line: "Service disruption", sub: n(r.fails, "critical issue") + (r.warns ? " and " + n(r.warns, "warning") : "") };
+  if (r.warns) return { icon: "🟡", line: "Operational, with warnings", sub: n(r.warns, "item") + " to review" };
+  return { icon: "🟢", line: "All systems operational", sub: "No action needed" };
 }
-function selfTestSections(r, bullet) {
-  const by = s => r.checks.filter(c => c.state === s);
-  const out = [];
-  if (by("fail").length) out.push({ title: "Not working", lines: by("fail").map(c => bullet + c.name + ": " + sentence(c.detail)) });
-  if (by("warn").length) out.push({ title: "Needs attention", lines: by("warn").map(c => bullet + c.name + ": " + sentence(c.detail)) });
-  if (by("ok").length) out.push({ title: "Working normally", lines: [by("ok").map(c => c.name).join(" · ")] });
-  return out;
+function selfTestSummary(r) { const o = selfTestOverall(r); return o.line + ": " + o.sub + "."; }
+/** Problems first (critical, then warnings), each with what it affects and how to fix it. */
+function selfTestActions(r) {
+  return r.checks.filter(c => c.state !== "ok").sort((a, b) => (a.state === "fail" ? 0 : 1) - (b.state === "fail" ? 0 : 1))
+    .map(c => { const g = SELFTEST_GUIDE[c.name] || []; return { name: c.name, state: c.state, issue: sentence(c.detail), impact: g[1] || "", fix: sentence(c.fix || g[2] || "") }; });
 }
+function selfTestGroups(r) {
+  const groups = SELFTEST_GROUPS.map(g => ({ name: g, checks: [] })), other = { name: "Other", checks: [] };
+  r.checks.forEach(c => { const g = groups.find(x => x.name === (SELFTEST_GUIDE[c.name] || [])[0]) || other; g.checks.push(c); });
+  return groups.concat(other).filter(g => g.checks.length);
+}
+function nextSelfTest(iso) {
+  const d = new Date(iso); d.setUTCHours(18, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() + ((7 - d.getUTCDay()) % 7 || (Date.parse(iso) >= d.getTime() ? 7 : 0)));
+  return d;
+}
+const fmtDay = d => d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 function selfTestText(r) {
-  return ["System check, " + r.at.replace("T", " ").slice(0, 16) + " UTC", selfTestSummary(r), ""]
-    .concat(...selfTestSections(r, "- ").map(s => [s.title, ...s.lines, ""]), (r.facts || []).length ? [r.facts.join(" · ")] : []).join("\n");
+  const o = selfTestOverall(r), acts = selfTestActions(r), L = [];
+  L.push("SYSTEM HEALTH REPORT", fmtDay(new Date(r.at)) + ", " + r.at.slice(11, 16) + " UTC", "",
+    "Overall status: " + o.line + " (" + o.sub + ")", r.checks.length + " checks: " + (r.checks.length - r.fails - r.warns) + " OK, " + r.warns + " warning, " + r.fails + " critical", "");
+  if (acts.length) {
+    L.push("ACTION REQUIRED");
+    acts.forEach((a, i) => L.push((i + 1) + ". [" + SELFTEST_STATE[a.state][1] + "] " + a.name, "   Issue:  " + a.issue, "   Impact: " + a.impact, "   Fix:    " + a.fix, ""));
+  }
+  L.push("COMPONENT STATUS");
+  selfTestGroups(r).forEach(g => { L.push(g.name); g.checks.forEach(c => L.push("  " + SELFTEST_STATE[c.state][2].padEnd(16) + c.name + (c.state === "ok" ? " — " + c.detail : ""))); });
+  if ((r.facts || []).length) L.push("", "KEY FIGURES", r.facts.join(" · "));
+  L.push("", "Next scheduled check: " + fmtDay(nextSelfTest(r.at)) + ", 18:00 UTC");
+  return L.join("\n");
 }
 async function postSelfTest(env, r, always) {
   const channel = CONFIG.SELFTEST_CHANNEL_ID || ((r.fails || r.warns) ? CONFIG.APPROVAL_CHANNEL_ID : "");
   if (!channel || (!always && !CONFIG.SELFTEST_CHANNEL_ID && !r.fails && !r.warns)) return;
-  const body = [selfTestSummary(r)].concat(...selfTestSections(r, "• ").map(s => ["", "**" + s.title + "**", ...s.lines]));
-  if ((r.facts || []).length) body.push("", "-# " + r.facts.join(" · "));
+  const o = selfTestOverall(r), acts = selfTestActions(r), cut = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+  const desc = ["## " + o.icon + " " + o.line, o.sub + " · " + r.checks.length + " checks run", ""];
+  if (acts.length) {
+    desc.push("### Action required");
+    acts.forEach((a, i) => desc.push("**" + (i + 1) + ". " + a.name + "** · " + SELFTEST_STATE[a.state][0] + " " + SELFTEST_STATE[a.state][1],
+      "> **Issue:** " + a.issue, "> **Impact:** " + a.impact, "> **Fix:** " + a.fix, ""));
+  }
+  desc.push("### Component status");
+  const fields = selfTestGroups(r).map(g => ({ name: g.name, inline: true,
+    value: cut(g.checks.map(c => SELFTEST_STATE[c.state][0] + " " + c.name).join("\n"), 1024) }));
+  // Two columns: a blank field after every second group.
+  const laid = [];
+  fields.forEach((f, i) => { laid.push(f); if (i % 2 === 1 && i < fields.length - 1) laid.push({ name: "​", value: "​", inline: false }); });
+  if ((r.facts || []).length) laid.push({ name: "Key figures", value: cut(r.facts.join(" · "), 1024), inline: false });
   await discord(env, "POST", `/channels/${channel}/messages`, { allowed_mentions: NO_PINGS, embeds: [{
-    author: { name: CONFIG.NAME }, color: r.fails ? CONFIG.COLOURS.denied : r.warns ? CONFIG.COLOURS.pending : CONFIG.COLOURS.approved,
-    title: "Weekly system check", description: body.join("\n").slice(0, 4000),
-    footer: { text: "Runs every Sunday at 18:00 UTC" }, timestamp: r.at }] });
+    author: { name: CONFIG.NAME + " · Automated monitoring" }, color: r.fails ? CONFIG.COLOURS.denied : r.warns ? CONFIG.COLOURS.pending : CONFIG.COLOURS.approved,
+    title: "Weekly System Health Report", description: cut(desc.join("\n").trim(), 4000), fields: laid.slice(0, 25),
+    footer: { text: "🟢 Operational  🟡 Warning  🔴 Critical · Next check " + fmtDay(nextSelfTest(r.at)) + ", 18:00 UTC" }, timestamp: r.at }] });
 }
 async function cronSelfTest(env, now) {
   const d = new Date(now);
