@@ -59,6 +59,7 @@ const CONFIG = {
   HQ_URL: "",                   // the HQ site's public API, e.g. https://rna-hq.pages.dev/api/public (reads ?api=events, profile, hqroster, home, market)
   HQ_PROFILE_URL: "",           // someone's HQ profile page; {emp} = their employee #, e.g. "https://…/exec?page=profile&emp={emp}"
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
+  SELFTEST_CHANNEL_ID: "",      // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
   MARKET_LOG_CHANNEL_ID: "",    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
   EVENT_PING_ROLE_ID: "",       // role pinged on event announcements/reminders ("" = no ping)
   ANNOUNCE_CHANNEL_ID: "",      // promotion posts + the HQ announcement mirror
@@ -110,6 +111,14 @@ export default {
       return new Response(log.length ? log.join("\n") : "Ran. Nothing to do.");
     }
 
+    // The self-test, now: /selftest?key=REGISTER_KEY (add &post=1 to post the report as well)
+    if (request.method === "GET" && url.pathname === "/selftest") {
+      if (!env.REGISTER_KEY || url.searchParams.get("key") !== env.REGISTER_KEY) return new Response("Wrong key", { status: 403 });
+      const r = await selfTest(env);
+      if (url.searchParams.get("post") === "1") await postSelfTest(env, r, true);
+      return new Response(selfTestText(r), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+    }
+
     // What the HQ API sends back (field names), for checking: /diag?key=REGISTER_KEY
     if (request.method === "GET" && url.pathname === "/diag") {
       if (!env.REGISTER_KEY || url.searchParams.get("key") !== env.REGISTER_KEY) return new Response("Wrong key", { status: 403 });
@@ -138,6 +147,7 @@ export default {
     if (request.method === "POST" && url.pathname === "/sync") {
       const body = await request.json().catch(() => ({}));
       if (!env.SHEETS_SECRET || body.secret !== env.SHEETS_SECRET) return new Response("Not allowed", { status: 403 });
+      if (body.type === "selftest") return json({ ok: true, pong: String(body.nonce || "") });   // the site's self-test ping
       // Answered straight away: the roster only waits 5 seconds, and editing the message, giving roles
       // and sending the DM can take longer — the work carries on after the answer (waitUntil).
       const work = (async () => {
@@ -2456,6 +2466,7 @@ async function runCron(env, now) {
   // (promotions on the website, approved requests, awards …). Turn off with CONFIG.ROLE_AUTO_SYNC = false.
   if (CONFIG.ROLE_AUTO_SYNC !== false) await step("roles", () => cronRoleChanges(env, now));
   if (CONFIG.ROLE_AUTO_SYNC !== false) await step("request roles", () => cronRequestRoles(env, now));
+  await step("self-test", () => cronSelfTest(env, now));
   return log;
 }
 
@@ -3637,4 +3648,113 @@ async function marketComponent(env, i) {
   } catch (err) {
     await followup(env, i, "Couldn't do that: " + err.message);
   }
+}
+
+// ---------------------------------------------------------------------
+// Weekly self-test (Sundays 18:00 UTC, from the 5-minute job). Checks every link the bot depends on without
+// changing real data, and posts a report: every week in SELFTEST_CHANNEL_ID if set, otherwise only when
+// something is wrong (in the approval-logs channel). Run it any time: /selftest?key=REGISTER_KEY.
+// ---------------------------------------------------------------------
+async function selfTest(env) {
+  const checks = [];
+  const add = (name, state, detail) => checks.push({ name, state, detail: String(detail || "") });   // state: ok | warn | fail
+  const tryStep = async (name, fn) => { try { await fn(); } catch (e) { add(name, "fail", e.message || e); } };
+  const ago = iso => iso ? Math.round((Date.now() - Date.parse(iso)) / 60000) : null;
+
+  // 1. settings
+  const missing = ["BOT_TOKEN", "SHEETS_SECRET", "SHEETS_URL", "HQ_URL", "REGISTER_KEY"].filter(k => !env[k]);
+  if (!env.BOT_KV) missing.push("BOT_KV (KV binding)");
+  if (!CONFIG.GUILD_ID) missing.push("GUILD_ID");
+  add("Bot settings", missing.length ? "fail" : "ok", missing.length ? "missing: " + missing.join(", ") : "all set");
+
+  // 2. bot → website (+ shared secret)
+  let names = 0;
+  await tryStep("Bot to website", async () => {
+    const r = await bridge(env, { action: "names" });
+    if (!r.ok) throw new Error(/Not allowed/i.test(r.error || "") ? "the website refused the shared secret (SHEETS_SECRET)" : r.error);
+    names = (r.people || []).length;
+    add("Bot to website", names ? "ok" : "warn", names ? names + (names === 1 ? " person" : " people") + " on the roster" : "the roster came back empty");
+  });
+  await tryStep("Public HQ pages", async () => {
+    const ev = await hq(env, "events", null, true);
+    { const n = hqEvents(ev).length; add("Public HQ pages", "ok", n + " upcoming event" + (n === 1 ? "" : "s")); }
+  });
+
+  // 3. website: database, approvals, jobs, and website → bot
+  let site = null;
+  await tryStep("Website self-check", async () => {
+    site = await bridge(env, { action: "selfTest", nonce: String(Date.now()) });
+    if (!site.ok) throw new Error(site.error || "no answer");
+  });
+  if (site && site.ok) {
+    add("Database", site.db && site.db.ok ? "ok" : "fail", site.db && site.db.ok ? "read and write work" : (site.db && site.db.error) || "write check failed");
+    const p = site.botPing || {};
+    add("Website to bot", p.ok ? "ok" : "fail", p.ok ? "reached in " + p.ms + " ms (" + p.via + ")" : (p.error || "no answer") + ". Results and DMs won't arrive until this is fixed.");
+    const q = site.queue || {};
+    const qProblems = [];
+    if (q.stuck) qProblems.push(q.stuck + " stuck in Processing");
+    if (q.approvedWaiting) qProblems.push(q.approvedWaiting + " approved in Discord but not carried out after 15 minutes");
+    if (q.errors) qProblems.push(q.errors + " in Error (press Retry on the Approvals page)");
+    if (q.pendingOld) qProblems.push(q.pendingOld + " waiting more than 24 hours");
+    add("Approvals queue", q.stuck || q.approvedWaiting ? "fail" : qProblems.length ? "warn" : "ok", qProblems.length ? qProblems.join("; ") : (q.pending || 0) + " waiting, nothing stuck");
+    const st = site.settings || {};
+    if (st.approvalsPaused || st.frozen) add("Roster settings", "warn", [st.approvalsPaused && "approvals are paused", st.frozen && "the roster is frozen for changes"].filter(Boolean).join("; "));
+    const j = site.jobs || {}, aj = ago(j.approvals), dj = ago(j.daily);
+    add("Website background jobs", aj === null || aj > 120 || dj === null || dj > 26 * 60 ? "warn" : "ok",
+      `approvals job ${aj === null ? "never ran" : aj + " min ago"}, daily job ${dj === null ? "never ran" : Math.round(dj / 60) + " h ago"}`);
+  }
+
+  // 4. Discord: channels, roles, commands
+  const chans = [["approval-logs", CONFIG.APPROVAL_CHANNEL_ID], ["event logs", CONFIG.EVENT_LOG_CHANNEL_ID], ["events", CONFIG.EVENTS_CHANNEL_ID],
+    ["requests", CONFIG.REQUEST_CHANNEL_ID], ["Market requests", CONFIG.MARKET_LOG_CHANNEL_ID], ["self-test", CONFIG.SELFTEST_CHANNEL_ID]]
+    .concat(Object.keys(CONFIG.REQUEST_CHANNELS || {}).map(k => [k + " requests", CONFIG.REQUEST_CHANNELS[k]])).filter(([, id]) => id);
+  const badChans = [];
+  for (const [label, id] of chans) { try { await discord(env, "GET", `/channels/${id}`); } catch (e) { badChans.push(label + " (" + (/403|404/.exec(e.message) || ["error"])[0] + ")"); } }
+  add("Discord channels", badChans.length ? "fail" : "ok", badChans.length ? "can't reach: " + badChans.join(", ") : chans.length + " channels reachable");
+  if (CONFIG.GUILD_ID) await tryStep("Discord roles", async () => {
+    const plan = await rolePlan(env, await hqRosterByEmp(env, true).catch(() => ({})), true);
+    const n = Object.keys(plan.managed).length;
+    if (plan.tooHigh.length) add("Discord roles", "fail", plan.tooHigh.length + " roles are above the bot's role, so it can't give them: " + plan.tooHigh.slice(0, 8).join(", "));
+    else add("Discord roles", n ? "ok" : "warn", n ? n + " roles managed, none above the bot" : "no server roles match the roster");
+  });
+  await tryStep("Slash commands", async () => {
+    const want = ["lookup"].concat(Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => REQUESTS[k].command), COMMUNITY_COMMANDS.map(c => c.name));
+    const have = (await discord(env, "GET", `/applications/${CONFIG.APP_ID}/commands`)).map(c => c.name);
+    const gone = want.filter(n => have.indexOf(n) === -1);
+    add("Slash commands", gone.length ? "warn" : "ok", gone.length ? "not registered: /" + gone.join(", /") + ". Open /register?key=… once." : want.length + " registered");
+  });
+
+  // 5. role updates over the last week
+  const recent = (await kvGet(env, "state:lastroles", []) || []).filter(x => Date.now() - Date.parse(x.at) < 7 * 86400000);
+  const errs = recent.filter(x => /^ERROR/.test(x.result));
+  add("Role updates", errs.length ? "warn" : "ok", errs.length ? errs.length + " of " + recent.length + " failed this week, latest: " + errs[0].result.replace(/^ERROR: /, "") : recent.length + " this week, none failed");
+
+  return { at: new Date().toISOString(), checks, fails: checks.filter(c => c.state === "fail").length, warns: checks.filter(c => c.state === "warn").length };
+}
+const ST_ICON = { ok: "✅", warn: "⚠️", fail: "❌" };
+function selfTestSummary(r) {
+  return r.fails ? `${r.fails} problem${r.fails === 1 ? "" : "s"} found` + (r.warns ? `, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : "")
+    : r.warns ? `All working, ${r.warns} warning${r.warns === 1 ? "" : "s"}` : `All ${r.checks.length} checks passed`;
+}
+function selfTestText(r) {
+  return "Self-test, " + r.at + "\n" + selfTestSummary(r) + "\n\n" + r.checks.map(c => `${ST_ICON[c.state]} ${c.name}: ${c.detail}`).join("\n");
+}
+async function postSelfTest(env, r, always) {
+  const channel = CONFIG.SELFTEST_CHANNEL_ID || ((r.fails || r.warns) ? CONFIG.APPROVAL_CHANNEL_ID : "");
+  if (!channel || (!always && !CONFIG.SELFTEST_CHANNEL_ID && !r.fails && !r.warns)) return;
+  await discord(env, "POST", `/channels/${channel}/messages`, { allowed_mentions: NO_PINGS, embeds: [{
+    author: { name: CONFIG.NAME }, color: r.fails ? CONFIG.COLOURS.denied : r.warns ? CONFIG.COLOURS.pending : CONFIG.COLOURS.approved,
+    title: "Weekly self-test: " + selfTestSummary(r),
+    description: r.checks.map(c => `${ST_ICON[c.state]} **${c.name}:** ${c.detail}`).join("\n").slice(0, 4000),
+    footer: { text: "Runs every Sunday at 18:00 UTC" }, timestamp: r.at }] });
+}
+async function cronSelfTest(env, now) {
+  const d = new Date(now);
+  if (d.getUTCDay() !== 0 || d.getUTCHours() < 18 || !env.BOT_KV) return "";
+  const last = await kvGet(env, "state:selftest", 0);
+  if (now - (Number(last) || 0) < 5 * 86400000) return "";
+  await kvPut(env, "state:selftest", now);
+  const r = await selfTest(env);
+  await postSelfTest(env, r, false);
+  return selfTestSummary(r);
 }
