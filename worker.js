@@ -2065,8 +2065,7 @@ async function leaderboardCommand(env, i) {
 }
 
 // ---- /mystats: the caller's own stats, privately ----
-// Shows the stats straight away, then adds a picture of their website profile when the screenshot service
-// is set up (Cloudflare Browser Run: secrets CF_ACCOUNT_ID and CF_BROWSER_TOKEN; pictures are kept 6 hours).
+// With a button to their profile on the website.
 const STAT_LABEL = { attended: "Attended", cohosted: "Co-hosted", hosted: "Hosted", supervised: "Supervised" };
 function siteBase(env) { try { return new URL(hqBase(env)).origin; } catch (e) { return ""; } }
 function profileUrl(env, emp) {
@@ -2103,32 +2102,6 @@ function typeTable(byType, isWorker) {
   const w = Math.max(4, ...types.map(t => name(t).length));
   const line = (label, vals) => label.padEnd(w) + vals.map((v, k) => String(v).padStart(cols[k][0].length + 2)).join("");
   return ("```\n" + [line("Type", cols.map(c => c[0])), ...types.map(t => line(name(t), cols.map(c => n(byType[t][c[1]]))))].join("\n") + "\n```").slice(0, 1024);
-}
-async function profileShot(env, emp) {
-  const url = profileUrl(env, emp);
-  if (!env.CF_ACCOUNT_ID || !env.CF_BROWSER_TOKEN || !env.BOT_KV || !url) return null;
-  const key = "shot:" + emp;
-  try {
-    const hit = await env.BOT_KV.getWithMetadata(key, "arrayBuffer");
-    if (hit && hit.value) return { name: "profile.png", type: "image/png", data: hit.value, at: (hit.metadata && hit.metadata.at) || 0 };
-  } catch (e) { /* take a new one */ }
-  const body = JSON.stringify({
-    url, viewport: { width: 1100, height: 900, deviceScaleFactor: 1.5 },
-    gotoOptions: { waitUntil: "networkidle0", timeout: 25000 },
-    waitForSelector: { selector: ".profile:not([aria-busy]) .record", timeout: 20000 },
-    selector: ".wrap.profile",
-    addStyleTag: [{ content: ".profile .back, .profile .pro-side .block:last-child { display: none !important; } .wrap.profile { padding-bottom: 24px !important; }" }]
-  });
-  for (const path of ["browser-run", "browser-rendering"]) {           // the service's new and old names
-    const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/${path}/screenshot`, {
-      method: "POST", headers: { Authorization: "Bearer " + env.CF_BROWSER_TOKEN, "Content-Type": "application/json" }, body });
-    if (res.status === 404) continue;
-    if (!res.ok || !/^image\//.test(res.headers.get("Content-Type") || "")) throw new Error("screenshot service " + res.status + ": " + (await res.text()).slice(0, 200));
-    const data = await res.arrayBuffer(), at = Date.now();
-    await env.BOT_KV.put(key, data, { expirationTtl: 6 * 3600, metadata: { at } }).catch(() => {});
-    return { name: "profile.png", type: "image/png", data, at };
-  }
-  return null;
 }
 async function myStatsCommand(env, i) {
   try {
@@ -2193,14 +2166,6 @@ async function myStatsCommand(env, i) {
     const components = link ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open full profile", url: link }] }] : [];
     await editOriginal(env, i, { content: "", embeds: [embed], components, allowed_mentions: NO_PINGS });
 
-    // Then the website profile picture, if the screenshot service is set up.
-    const shot = await profileShot(env, P.emp).catch(err => { console.warn("Profile screenshot: " + err.message); return null; });
-    if (shot) {
-      embed.image = { url: "attachment://profile.png" };
-      embed.footer.text = "Only you can see this · Profile picture from the website, taken " + (shot.at ? new Date(shot.at).toUTCString().slice(17, 22) + " UTC" : "just now");
-      await discordFiles(env, "PATCH", `/webhooks/${CONFIG.APP_ID}/${i.token}/messages/@original`,
-        { embeds: [embed], components, attachments: [{ id: 0, filename: "profile.png" }], allowed_mentions: NO_PINGS }, [shot]).catch(err => console.warn("Profile picture upload: " + err.message));
-    }
   } catch (err) {
     await editReply(env, i, "Couldn't load your stats: " + err.message).catch(() => {});
   }
@@ -3248,7 +3213,7 @@ const COMMUNITY_COMMANDS = [
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
   { name: "leaderboard", description: "This month's top hosts and attendees", dm_permission: false, options: [
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
-  { name: "mystats", description: "Your stats: this month, weekly quota, promotion progress and your website profile (only you see it)", dm_permission: false },
+  { name: "mystats", description: "Your stats: this month, weekly quota and promotion progress (only you see it)", dm_permission: false },
   { name: "link", description: "Link to your roster entry and get your rank, department, award and staff roles", dm_permission: false, options: [
     { type: 3, name: "name", description: "First time: pick your roster name. Already linked: leave empty to update your roles", required: false, autocomplete: true, max_length: 60 }] },
   { name: "roster", description: "Apply to be rostered, or update your rank / details", dm_permission: false, options: [
