@@ -1929,10 +1929,26 @@ async function eventSchedule(env, i, o) {
     // The time zone the time was typed in: the one typed in the command, else their device's (saved with the
     // link below), else the one on the roster, else UTC.
     const u0 = caller(i), dev = o.timezone ? "" : await deviceTz(env, u0.id);
+    const useRoster = o.__tz === "roster";
     const tz = o.timezone || dev || (me && me.z) || "UTC+0";
     const from = o.timezone ? "as typed" : dev ? "your device" : me && me.z ? "your roster time zone" : "no time zone saved";
     const tzLink = await deviceTzLink(env, i.__request, u0.id).catch(() => "");
     const tzRow = tzLink ? [{ type: 1, components: [{ type: 2, style: 5, label: dev ? "Change my time zone" : "Use my device's time zone", url: tzLink }] }] : [];
+    // No time zone typed or saved yet: set it first (one click), so the time isn't read in the wrong zone.
+    if (!o.timezone && !dev && !useRoster && tzLink) {
+      const keep = {}; ["title", "date", "time", "length", "host", "description"].forEach(k => { if (o[k] !== undefined) keep[k] = o[k]; });
+      await kvPut(env, "evs:" + u0.id, keep, 3600);
+      const rz = me && me.z ? cleanTimezone(me.z) : "";
+      return editOriginal(env, i, { allowed_mentions: NO_PINGS, content: [
+        "**Set your time zone first.** Discord doesn't tell the bot your time zone, so it needs one click to read it from your device.",
+        "1. Press **Set my time zone** and confirm on the page that opens.",
+        "2. Come back here and press **Schedule event**.",
+        "-# You only do this once. Your event details are kept for an hour."].join("\n"),
+        components: [{ type: 1, components: [
+          { type: 2, style: 5, label: "Set my time zone", url: tzLink },
+          { type: 2, style: 1, label: "Schedule event", custom_id: "evs:go" }].concat(rz ? [
+          { type: 2, style: 2, label: ("Use my roster time zone (" + rz + ")").slice(0, 80), custom_id: "evs:roster" }] : []) }] });
+    }
     const when = parseWhen(o.date, o.time, tz);
     if (when.error) return editOriginal(env, i, { content: when.error, components: tzRow, allowed_mentions: NO_PINGS });
     if (when.ms < Date.now() + 60000) return editOriginal(env, i, { content: `That's in the past (<t:${ts(when.ms)}:F>). Check the date, time and time zone (${zoneLabel(tz)}, ${from}).`, components: tzRow, allowed_mentions: NO_PINGS });
@@ -1962,6 +1978,19 @@ async function eventSchedule(env, i, o) {
   } catch (err) {
     await editReply(env, i, "Couldn't schedule it: " + err.message).catch(() => {});
   }
+}
+
+// The "Set your time zone first" buttons: schedule the kept event with the saved device time zone (or the roster one).
+function eventScheduleButton(env, ctx, i) {
+  const u = caller(i), roster = i.data.custom_id === "evs:roster";
+  ctx.waitUntil((async () => {
+    const o = await kvGet(env, "evs:" + u.id, null);
+    if (!o) return editOriginal(env, i, { content: "Those event details have expired. Run **/event schedule** again.", components: [], allowed_mentions: NO_PINGS });
+    if (!roster && !(await deviceTz(env, u.id))) return followup(env, i, "Your time zone isn't saved yet. Press **Set my time zone**, confirm on the page, then press **Schedule event** again.");
+    await env.BOT_KV.delete("evs:" + u.id).catch(() => {});
+    return eventSchedule(env, i, Object.assign({}, o, roster ? { __tz: "roster" } : {}));
+  })().catch(err => followup(env, i, "Couldn't schedule it: " + err.message)));
+  return { type: R.DEFER_UPDATE };
 }
 
 async function eventCancel(env, i, o) {
@@ -3278,6 +3307,7 @@ async function handleCommunity(i, env, ctx) {
 
   if (i.type === T.COMPONENT && /^rq:(yes|no|claim|release):/.test(i.data.custom_id)) return requestDecisionAction(env, ctx, i);
   if (i.type === T.COMPONENT && /^mk:/.test(i.data.custom_id)) { ctx.waitUntil(marketComponent(env, i)); return { type: R.DEFER_UPDATE }; }
+  if (i.type === T.COMPONENT && /^evs:(go|roster)$/.test(i.data.custom_id)) return eventScheduleButton(env, ctx, i);
   if (i.type === T.MODAL_SUBMIT && /^rq:(noform:|loaform$)/.test(i.data.custom_id)) return requestDecisionSubmit(env, ctx, i);
   return null;
 }
