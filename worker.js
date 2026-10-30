@@ -64,7 +64,8 @@ const CONFIG = {
   // Market perks that are just a Discord role: bought instantly (points taken, role given straight away, and taken
   // off again when the perk runs out). Matched to the shop item and the server role by name ("Perms" = "Permission").
   // Everything else in the shop is sent to DMO for approval.
-  MARKET_AUTO_ROLES: ["Temp VC Access", "Soundboard Permission", "GIF Perms", "DJ", "Image Perms"],
+  // A perk with more than one name (shop item and role named differently): put the names in a list.
+  MARKET_AUTO_ROLES: ["Temp VC Access", "Soundboard Permission", "GIF Perms", ["Cornelius Fudge DJ Perms", "DJ"], "Image Perms"],
   EVENT_PING_ROLE_ID: "",       // role pinged on event announcements/reminders ("" = no ping)
   ANNOUNCE_CHANNEL_ID: "",      // promotion posts + the HQ announcement mirror
   DIGEST_CHANNEL_ID: "",        // Monday digest ("" = ANNOUNCE_CHANNEL_ID)
@@ -3788,14 +3789,16 @@ async function marketCommand(env, i) {
 }
 // ---- Instant Market perks (CONFIG.MARKET_AUTO_ROLES): a Discord role, given straight away ----
 const perkKey = n => String(n || "").toLowerCase().replace(/permissions?|perms?\b/g, "perm").replace(/[^a-z0-9]/g, "");
-function isAutoPerk(itemName) { const k = perkKey(itemName); return !!k && (CONFIG.MARKET_AUTO_ROLES || []).some(n => perkKey(n) === k); }
+const perkNames = e => [].concat(e).map(String);                       // a perk's names (one, or a list)
+const perkHas = (e, name) => { const k = perkKey(name); return !!k && perkNames(e).some(n => perkKey(n) === k); };
+function isAutoPerk(itemName) { return (CONFIG.MARKET_AUTO_ROLES || []).some(e => perkHas(e, itemName)); }
 /** The server role for an instant perk → { role } or { error }. */
 async function perkRole(env, itemName) {
-  const want = (CONFIG.MARKET_AUTO_ROLES || []).find(n => perkKey(n) === perkKey(itemName));
+  const want = (CONFIG.MARKET_AUTO_ROLES || []).find(e => perkHas(e, itemName));
   if (!want || !CONFIG.GUILD_ID) return { error: "not an instant perk" };
   const roles = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/roles`);
-  const role = roles.find(r => perkKey(r.name) === perkKey(want));
-  if (!role) return { error: `There's no **${want}** role in the server.` };
+  const role = roles.find(r => perkHas(want, r.name));
+  if (!role) return { error: `There's no **${perkNames(want).join("** or **")}** role in the server.` };
   const me = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/members/${CONFIG.APP_ID}`).catch(() => null);
   const pos = {}; roles.forEach(r => { pos[r.id] = r.position; });
   const top = me && me.roles && me.roles.length ? Math.max(...me.roles.map(id => pos[id] || 0)) : Infinity;
@@ -3984,10 +3987,11 @@ async function selfTest(env) {
     const shop = await hq(env, "market", null, true).catch(() => null);
     const items = ((shop && (shop.shop || shop.items)) || []).map(x => x.name || "");
     const bad = [];
-    for (const n of CONFIG.MARKET_AUTO_ROLES) {
+    for (const e of CONFIG.MARKET_AUTO_ROLES) {
+      const n = perkNames(e)[0];
       const pr = await perkRole(env, n).catch(e => ({ error: e.message }));
       if (pr.error) bad.push(pr.error.replace(/\*\*/g, "").replace(/\.$/, ""));
-      if (items.length && !items.some(x => perkKey(x) === perkKey(n))) bad.push(`no shop item called ${n}`);
+      if (items.length && !items.some(x => perkHas(e, x))) bad.push(`no shop item called ${perkNames(e).join(" or ")}`);
     }
     add("Instant Market perks", bad.length ? "warn" : "ok", bad.length ? bad.join("; ") : CONFIG.MARKET_AUTO_ROLES.length + " perks matched to roles");
   });
