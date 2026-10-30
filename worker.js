@@ -119,6 +119,9 @@ export default {
       return new Response(selfTestText(r), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }
 
+    // "Use my device's time zone": a page that reads the browser's time zone and saves it for that Discord user.
+    if (url.pathname === "/tz") return deviceTzPage(env, request, url);
+
     // What the HQ API sends back (field names), for checking: /diag?key=REGISTER_KEY
     if (request.method === "GET" && url.pathname === "/diag") {
       if (!env.REGISTER_KEY || url.searchParams.get("key") !== env.REGISTER_KEY) return new Response("Wrong key", { status: 403 });
@@ -201,6 +204,7 @@ export default {
     if (!(await verify(request, body))) return new Response("Bad signature", { status: 401 });
 
     const i = JSON.parse(body);
+    Object.defineProperty(i, "__request", { value: request, enumerable: false });   // the bot's own address, for links
     try {
       return json(await handle(i, env, ctx));
     } catch (e) {
@@ -1799,13 +1803,14 @@ async function postEventMessage(env, e, kind, replyTo) {
   return discord(env, "POST", `/channels/${CONFIG.EVENTS_CHANNEL_ID}/messages`, body);
 }
 
-// "2026-10-11" / "11/10/2026" / "today" / "tomorrow" + "19:30" / "7pm" + "UTC+1" -> UTC ms
+// "2026-10-11" / "11/10/2026" / "today" / "tomorrow" + "19:30" / "7pm" + "UTC+1" or "Europe/London" -> UTC ms
 function parseWhen(dateText, timeText, tzText) {
   const d = String(dateText || "").trim().toLowerCase();
-  const offset = tzOffsetMinutes(tzText);
-  if (offset === null) return { error: `"${tzText}" isn't a timezone like UTC+1 or UTC-5.` };
+  const fixed = tzOffsetMinutes(tzText), zone = fixed === null ? validZone(tzText) : "";
+  if (fixed === null && !zone) return { error: `"${tzText}" isn't a timezone like UTC+1 or UTC-5.` };
+  const offsetAt = ms => fixed !== null ? fixed : zoneOffset(zone, ms);   // minutes ahead of UTC at that moment
   let y, mo, day;
-  const local = new Date(Date.now() + offset * 60000);           // "today" in that timezone
+  const local = new Date(Date.now() + offsetAt(Date.now()) * 60000);   // "today" in that timezone
   if (d === "today" || d === "tomorrow") {
     const t = new Date(local.getTime() + (d === "tomorrow" ? 86400000 : 0));
     y = t.getUTCFullYear(); mo = t.getUTCMonth() + 1; day = t.getUTCDate();
@@ -1823,7 +1828,9 @@ function parseWhen(dateText, timeText, tzText) {
   if (tm[3] === "pm" && h < 12) h += 12;
   if (tm[3] === "am" && h === 12) h = 0;
   if (h > 23 || mi > 59) return { error: `"${timeText}" isn't a real time.` };
-  const ms = Date.UTC(y, mo - 1, day, h, mi) - offset * 60000;
+  const wall = Date.UTC(y, mo - 1, day, h, mi);
+  let ms = wall - offsetAt(wall) * 60000;
+  ms = wall - offsetAt(ms) * 60000;                                   // the offset on that date (summer time)
   const check = new Date(Date.UTC(y, mo - 1, day));
   if (isNaN(ms) || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== day) return { error: `"${dateText}" isn't a real date.` };
   return { ms: ms };
@@ -1834,6 +1841,74 @@ function tzOffsetMinutes(tz) {
   if (!m) return null;
   const v = (+m[2]) * 60 + (+(m[3] || 0));
   return v > 14 * 60 ? null : (m[1] === "-" ? -v : v);
+}
+/** "Europe/London" -> "Europe/London" if it's a real time zone, else "". */
+function validZone(z) {
+  z = String(z || "").trim();
+  if (!/^[A-Za-z_]+(\/[A-Za-z0-9_+-]+){1,2}$/.test(z)) return "";
+  try { new Intl.DateTimeFormat("en-GB", { timeZone: z }); return z; } catch (e) { return ""; }
+}
+/** Minutes a time zone is ahead of UTC at a given moment (summer time included). */
+function zoneOffset(zone, ms) {
+  const p = {};
+  new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    .formatToParts(new Date(ms)).forEach(x => { p[x.type] = x.value; });
+  return Math.round((Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) - Math.floor(ms / 1000) * 1000) / 60000);
+}
+/** "Europe/London (UTC+1)" style label for a time zone right now. */
+function zoneLabel(z) {
+  const zone = validZone(z);
+  if (!zone) return cleanTimezone(z);
+  const o = zoneOffset(zone, Date.now()), a = Math.abs(o);
+  return zone.replace(/_/g, " ") + " (UTC" + (o < 0 ? "-" : "+") + Math.floor(a / 60) + (a % 60 ? ":" + String(a % 60).padStart(2, "0") : "") + ")";
+}
+
+// ---- Device time zone: Discord doesn't tell bots a user's time zone, so a one-time link reads it from their browser ----
+async function tzSign(env, text) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("devtz|" + env.SHEETS_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(text)));
+  let bin = ""; mac.forEach(b => { bin += String.fromCharCode(b); });
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+/** A link (valid 1 hour) that lets this Discord user save their device's time zone. */
+async function deviceTzLink(env, request, userId) {
+  if (!env.BOT_KV || !env.SHEETS_SECRET || !request) return "";
+  const exp = Date.now() + 3600000, id = userId + "." + exp;
+  return new URL(request.url).origin + "/tz?u=" + encodeURIComponent(id) + "&s=" + await tzSign(env, id);
+}
+async function deviceTz(env, userId) { return env.BOT_KV ? validZone(await env.BOT_KV.get("devtz:" + userId).catch(() => "")) : ""; }
+async function deviceTzPage(env, request, url) {
+  const id = String(url.searchParams.get("u") || ""), sig = String(url.searchParams.get("s") || "");
+  const [uid, exp] = id.split(".");
+  const html = (body, status) => new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Time zone · ${CONFIG.NAME}</title>
+<style>:root{color-scheme:light dark;--bg:#f5f3ee;--fg:#1d1d1b;--mut:#6b6a66;--bd:#d8d5cc;--ac:#2f5d3a}@media(prefers-color-scheme:dark){:root{--bg:#1b1c1a;--fg:#eceae4;--mut:#a3a19a;--bd:#3a3b37;--ac:#6fae7f}}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
+main{max-width:420px;width:100%;box-sizing:border-box;border:1px solid var(--bd);border-radius:10px;padding:24px}h1{font-size:20px;margin:0 0 8px}p{margin:8px 0;color:var(--mut)}b{color:var(--fg)}
+.z{font-size:22px;font-weight:600;color:var(--fg);margin:16px 0}button{font:inherit;font-weight:600;background:var(--ac);color:#fff;border:0;border-radius:6px;padding:10px 18px;cursor:pointer}button[disabled]{opacity:.6}</style></head>
+<body><main>${body}</main></body></html>`, { status: status || 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY" } });
+  const valid = /^\d{5,25}$/.test(uid || "") && Number(exp) > Date.now() && env.SHEETS_SECRET && sig === await tzSign(env, id);
+  if (!valid) return html("<h1>This link has expired</h1><p>Run the command in Discord again to get a new one.</p>", 403);
+  if (request.method === "POST") {
+    const zone = validZone((await request.json().catch(() => ({}))).zone);
+    if (!zone) return json({ ok: false, error: "That time zone wasn't recognised." });
+    await env.BOT_KV.put("devtz:" + uid, zone);
+    return json({ ok: true, label: zoneLabel(zone) });
+  }
+  return html(`<h1>Use your device's time zone</h1><p>When you schedule events with the bot, times you type will be read in this time zone:</p>
+<div class="z" id="z">Checking…</div><button id="go" disabled>Use this time zone</button><p id="msg" role="status"></p>
+<p>It changes automatically for summer time. You can still type a different time zone in the command.</p>
+<script>
+var z = ""; try { z = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) {}
+var el = document.getElementById("z"), go = document.getElementById("go"), msg = document.getElementById("msg");
+if (z) { el.textContent = z.replace(/_/g, " "); go.disabled = false; } else { el.textContent = "Couldn't read it"; }
+go.onclick = function () {
+  go.disabled = true; msg.textContent = "Saving…";
+  fetch(location.href, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ zone: z }) })
+    .then(function (r) { return r.json(); })
+    .then(function (r) { msg.innerHTML = r.ok ? "<b>Saved.</b> You can close this page and go back to Discord." : (r.error || "Couldn't save it."); if (!r.ok) go.disabled = false; })
+    .catch(function () { msg.textContent = "Couldn't save it. Try again."; go.disabled = false; });
+};
+</script>`);
 }
 
 async function canManage(env, i) {
@@ -1851,10 +1926,16 @@ async function eventSchedule(env, i, o) {
     if (!gate.ok) return editReply(env, i, gate.error);
     const roster = await loadRoster(env).catch(() => null);
     const me = gate.me || (roster ? findPerson(roster, i) : null);
-    const tz = o.timezone || (me && me.z) || "UTC+0";
+    // The time zone the time was typed in: the one typed in the command, else their device's (saved with the
+    // link below), else the one on the roster, else UTC.
+    const u0 = caller(i), dev = o.timezone ? "" : await deviceTz(env, u0.id);
+    const tz = o.timezone || dev || (me && me.z) || "UTC+0";
+    const from = o.timezone ? "as typed" : dev ? "your device" : me && me.z ? "your roster time zone" : "no time zone saved";
+    const tzLink = await deviceTzLink(env, i.__request, u0.id).catch(() => "");
+    const tzRow = tzLink ? [{ type: 1, components: [{ type: 2, style: 5, label: dev ? "Change my time zone" : "Use my device's time zone", url: tzLink }] }] : [];
     const when = parseWhen(o.date, o.time, tz);
-    if (when.error) return editReply(env, i, when.error);
-    if (when.ms < Date.now() + 60000) return editReply(env, i, `That's in the past (<t:${ts(when.ms)}:F>). Check the date, time and timezone (${cleanTimezone(tz)}).`);
+    if (when.error) return editOriginal(env, i, { content: when.error, components: tzRow, allowed_mentions: NO_PINGS });
+    if (when.ms < Date.now() + 60000) return editOriginal(env, i, { content: `That's in the past (<t:${ts(when.ms)}:F>). Check the date, time and time zone (${zoneLabel(tz)}, ${from}).`, components: tzRow, allowed_mentions: NO_PINGS });
     const minutes = Math.round(Number(o.length) || 0);
     if (minutes < 5 || minutes > 720) return editReply(env, i, "The length must be between 5 and 720 minutes.");
     let host = cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i));
@@ -1876,7 +1957,8 @@ async function eventSchedule(env, i, o) {
       if (st) { st.seen[evKey(e)] = Date.now(); if (msg) st.msg[evKey(e)] = msg.id; await kvPut(env, "state:events", st); }
       if (msg) note = `\nAnnounced in <#${CONFIG.EVENTS_CHANNEL_ID}>.`;
     } catch (err) { note = `\nNot announced (${err.message}).`; }
-    await editOriginal(env, i, { content: "Event scheduled on the HQ." + note, embeds: [eventEmbed(e, "")], allowed_mentions: NO_PINGS });
+    const tzNote = `\n-# Time read in ${zoneLabel(tz)} (${from}).` + (!dev && !o.timezone && tzLink ? " Press the button to use your device's time zone from now on." : "");
+    await editOriginal(env, i, { content: "Event scheduled on the HQ." + note + tzNote, embeds: [eventEmbed(e, "")], components: tzRow, allowed_mentions: NO_PINGS });
   } catch (err) {
     await editReply(env, i, "Couldn't schedule it: " + err.message).catch(() => {});
   }
@@ -3209,7 +3291,7 @@ const COMMUNITY_COMMANDS = [
       { type: 3, name: "date", description: "DD/MM/YYYY, YYYY-MM-DD, today or tomorrow", required: true, max_length: 12 },
       { type: 3, name: "time", description: "Start time, 24-hour HH:MM (e.g. 19:30)", required: true, max_length: 8 },
       { type: 4, name: "length", description: "Length in minutes", required: true, min_value: 5, max_value: 720 },
-      { type: 3, name: "timezone", description: "The timezone you typed the time in (default: yours on the roster)", required: false, autocomplete: true, max_length: 12 },
+      { type: 3, name: "timezone", description: "The time zone you typed the time in (default: your device's, else your roster one)", required: false, autocomplete: true, max_length: 40 },
       { type: 3, name: "host", description: "Host (default: you)", required: false, autocomplete: true, max_length: 60 },
       { type: 3, name: "description", description: "What it's about", required: false, max_length: 1000 }] },
     { type: 1, name: "cancel", description: "Cancel an upcoming event (Management+)", options: [
