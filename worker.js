@@ -61,6 +61,10 @@ const CONFIG = {
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
   SELFTEST_CHANNEL_ID: "1554670493993271386",   // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
   MARKET_LOG_CHANNEL_ID: "",    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
+  // Market perks that are just a Discord role: bought instantly (points taken, role given straight away, and taken
+  // off again when the perk runs out). Matched to the shop item and the server role by name ("Perms" = "Permission").
+  // Everything else in the shop is sent to DMO for approval.
+  MARKET_AUTO_ROLES: ["Temp VC Access", "Soundboard Permission", "GIF Perms", "DJ", "Image Perms"],
   EVENT_PING_ROLE_ID: "",       // role pinged on event announcements/reminders ("" = no ping)
   ANNOUNCE_CHANNEL_ID: "",      // promotion posts + the HQ announcement mirror
   DIGEST_CHANNEL_ID: "",        // Monday digest ("" = ANNOUNCE_CHANNEL_ID)
@@ -2647,6 +2651,7 @@ async function runCron(env, now) {
   // (promotions on the website, approved requests, awards …). Turn off with CONFIG.ROLE_AUTO_SYNC = false.
   if (CONFIG.ROLE_AUTO_SYNC !== false) await step("roles", () => cronRoleChanges(env, now));
   if (CONFIG.ROLE_AUTO_SYNC !== false) await step("request roles", () => cronRequestRoles(env, now));
+  await step("market perks", () => cronPerks(env, now));
   await step("self-test", () => cronSelfTest(env, now));
   return log;
 }
@@ -3749,7 +3754,7 @@ function marketView(r) {
     if (!x.available) notes.push("unavailable");
     else if (x.cooldownUntil) notes.push(`you can buy again <t:${ts(Date.parse(x.cooldownUntil))}:D>`);
     else if (x.requested) notes.push("request waiting");
-    lines.push(`**${x.name}** · ${x.cost} points · ${x.lasts}${x.cooldown ? " · cooldown " + x.cooldown : ""}${notes.length ? ` (${notes.join(", ")})` : ""}` +
+    lines.push(`**${x.name}** · ${x.cost} points · ${x.lasts}${x.cooldown ? " · cooldown " + x.cooldown : ""}${isAutoPerk(x.name) ? " · instant" : ""}${notes.length ? ` (${notes.join(", ")})` : ""}` +
       (x.description ? `\n-# ${cleanLine(x.description, 180)}` : ""));
   });
   if (!(r.items || []).length) lines.push("The shop is empty.");
@@ -3760,8 +3765,9 @@ function marketView(r) {
     (m.cooldownEnds ? ` · cooldown until <t:${ts(Date.parse(m.cooldownEnds))}:D>` : "")).join("\n").slice(0, 1024) });
   const canBuy = r.eligible && !r.frozen ? (r.items || []).filter(x => x.available && !x.cooldownUntil && !x.requested && (r.infinite || (r.points || 0) - (r.waitingCost || 0) >= x.cost)) : [];
   const components = canBuy.length ? [{ type: 1, components: [{ type: 3, custom_id: "mk:pick", placeholder: "Choose an item to request",
-    options: canBuy.slice(0, 25).map(x => ({ label: x.name.slice(0, 100), value: x.name.slice(0, 100), description: (x.cost + " points · " + x.lasts).slice(0, 100) })) }] }] : [];
+    options: canBuy.slice(0, 25).map(x => ({ label: x.name.slice(0, 100), value: x.name.slice(0, 100), description: (x.cost + " points · " + x.lasts + (isAutoPerk(x.name) ? " · instant" : " · needs approval")).slice(0, 100) })) }] }] : [];
   if (r.eligible && !r.frozen && !canBuy.length && (r.items || []).length) lines.push("", "-# Nothing you can request right now: not enough points, unavailable, on cooldown or already requested.");
+  if ((r.items || []).some(x => isAutoPerk(x.name))) lines.push("", "-# **Instant** perks are Discord roles: you get them straight away. Everything else is approved by DMO first, and points are only taken once it's approved.");
   return { content: "", embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info, title: "Market", description: lines.join("\n").slice(0, 4000),
     fields, footer: { text: "Only you can see this" } }], components, allowed_mentions: NO_PINGS };
 }
@@ -3780,6 +3786,72 @@ async function marketCommand(env, i) {
     await editReply(env, i, "Couldn't open the Market: " + err.message).catch(() => {});
   }
 }
+// ---- Instant Market perks (CONFIG.MARKET_AUTO_ROLES): a Discord role, given straight away ----
+const perkKey = n => String(n || "").toLowerCase().replace(/permissions?|perms?\b/g, "perm").replace(/[^a-z0-9]/g, "");
+function isAutoPerk(itemName) { const k = perkKey(itemName); return !!k && (CONFIG.MARKET_AUTO_ROLES || []).some(n => perkKey(n) === k); }
+/** The server role for an instant perk → { role } or { error }. */
+async function perkRole(env, itemName) {
+  const want = (CONFIG.MARKET_AUTO_ROLES || []).find(n => perkKey(n) === perkKey(itemName));
+  if (!want || !CONFIG.GUILD_ID) return { error: "not an instant perk" };
+  const roles = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/roles`);
+  const role = roles.find(r => perkKey(r.name) === perkKey(want));
+  if (!role) return { error: `There's no **${want}** role in the server.` };
+  const me = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/members/${CONFIG.APP_ID}`).catch(() => null);
+  const pos = {}; roles.forEach(r => { pos[r.id] = r.position; });
+  const top = me && me.roles && me.roles.length ? Math.max(...me.roles.map(id => pos[id] || 0)) : Infinity;
+  if (role.position >= top) return { error: `The **${role.name}** role is above the bot's role, so the bot can't give it.` };
+  return { role };
+}
+async function marketInstant(env, i, u, chk, fail) {
+  const staffNote = " Nothing was taken. Let DMO know.";
+  const pr = await perkRole(env, chk.item).catch(e => ({ error: e.message }));
+  if (pr.error) return fail(pr.error + staffNote);
+  const member = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/members/${u.id}`).catch(() => null);
+  if (!member) return fail("You need to be in the server to get this perk.");
+  // Already have it (given by hand, or bought earlier): buying it wouldn't add anything, and its end date would take the role away.
+  if ((member.roles || []).includes(pr.role.id)) return fail(`You already have the **${pr.role.name}** role, so there's nothing to buy.`);
+  const reason = encodeURIComponent(`Market purchase: ${chk.item}`);
+  const roleUrl = `/guilds/${CONFIG.GUILD_ID}/members/${u.id}/roles/${pr.role.id}`;
+  const give = await fetch(API + roleUrl, { method: "PUT", headers: { Authorization: "Bot " + env.BOT_TOKEN, "X-Audit-Log-Reason": reason } });
+  if (!give.ok) return fail(`Couldn't give you the **${pr.role.name}** role (Discord ${give.status}).` + staffNote);
+  const res = await bridge(env, { action: "marketBuy", auto: true, item: chk.item, byId: u.id, byName: u.username || "" }).catch(e => ({ ok: false, error: e.message }));
+  if (!res.ok) {                                           // not recorded: take the role back, nothing was spent
+    await fetch(API + roleUrl, { method: "DELETE", headers: { Authorization: "Bot " + env.BOT_TOKEN, "X-Audit-Log-Reason": encodeURIComponent("Market purchase failed") } }).catch(() => {});
+    return fail(res.error);
+  }
+  if (res.ends) {                                          // taken off again by the 5-minute job when it runs out
+    const list = await kvGet(env, "state:perks", []) || [];
+    list.push({ uid: u.id, rid: pr.role.id, item: res.item, ends: res.ends });
+    await kvPut(env, "state:perks", list);
+  }
+  // A record in the Market channel, like the requests (no buttons: nothing to decide).
+  const content = ["**Market Purchase** (instant)", `Discord Username: ${u.username} (<@${u.id}>)`, `Roblox Username: ${chk.roblox || "—"}`,
+    `Item: ${res.item}`, `Cost: ${res.cost} points` + (res.infinite ? "" : ` (${res.after} left)`), `Lasts: ${chk.lasts}` + (res.ends ? ` · until <t:${ts(Date.parse(res.ends))}:D>` : "")].join("\n");
+  await discord(env, "POST", `/channels/${requestChannel("market")}/messages`, { content, allowed_mentions: NO_PINGS,
+    components: [statusRow(`Bought · ${pr.role.name} role given`, "✅")] }).catch(() => {});
+  return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.approved,
+    title: "Perk bought", description: `You now have the **${pr.role.name}** role.` + (res.ends ? ` It lasts until <t:${ts(Date.parse(res.ends))}:F>.` : " It's permanent."),
+    fields: [{ name: "Cost", value: res.cost + " points", inline: true }, { name: "Points left", value: res.infinite ? "∞" : String(res.after), inline: true }]
+      .concat(res.cooldownEnds ? [{ name: "Buy again from", value: `<t:${ts(Date.parse(res.cooldownEnds))}:D>`, inline: true }] : []),
+    footer: { text: "Only you can see this" } }],
+    components: [{ type: 1, components: [{ type: 2, style: 2, label: "Back to the Market", custom_id: "mk:back" }] }] });
+}
+/** 5-minute job: take instant-perk roles off once they've run out. */
+async function cronPerks(env, now) {
+  const list = await kvGet(env, "state:perks", []) || [];
+  if (!list.length) return "";
+  const keep = [], done = [];
+  for (const p of list) {
+    if (Date.parse(p.ends) > now) { keep.push(p); continue; }
+    const res = await fetch(API + `/guilds/${CONFIG.GUILD_ID}/members/${p.uid}/roles/${p.rid}`, { method: "DELETE",
+      headers: { Authorization: "Bot " + env.BOT_TOKEN, "X-Audit-Log-Reason": encodeURIComponent(`Market perk ended: ${p.item}`) } }).catch(() => null);
+    if (res && (res.ok || res.status === 404)) done.push(p.item);     // 404: they left the server or the role's gone
+    else keep.push(p);                                                  // try again next time
+  }
+  if (done.length) { await kvPut(env, "state:perks", keep); return "removed " + done.length + " ended perk role(s)"; }
+  return "";
+}
+
 async function marketComponent(env, i) {
   const id = i.data.custom_id;
   try {
@@ -3795,13 +3867,14 @@ async function marketComponent(env, i) {
       const x = (r.items || []).find(it => it.name.slice(0, 100) === name);
       if (!x) return editOriginal(env, i, Object.assign(marketView(r), { content: "That item isn't in the shop any more." }));
       const after = r.infinite ? "∞" : String((r.points || 0) - (r.waitingCost || 0) - x.cost);
-      return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "Request this purchase?",
+      const instant = isAutoPerk(x.name);
+      return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: instant ? "Buy this perk?" : "Request this purchase?",
         description: x.description ? cleanLine(x.description, 1000) : "",
         fields: [{ name: "Item", value: x.name, inline: true }, { name: "Cost", value: x.cost + " points", inline: true },
-          { name: "Points after approval", value: after, inline: true }, { name: "Lasts", value: x.lasts, inline: true },
+          { name: instant ? "Points after" : "Points after approval", value: after, inline: true }, { name: "Lasts", value: x.lasts, inline: true },
           { name: "Cooldown", value: x.cooldown || "None", inline: true }],
-        footer: { text: "DMO approve purchases. Points are only taken once it's approved." } }],
-        components: [{ type: 1, components: [{ type: 2, style: 3, label: "Request purchase", custom_id: "mk:buy" }, { type: 2, style: 2, label: "Back", custom_id: "mk:back" }] }] });
+        footer: { text: instant ? "Instant: the points are taken and you get the role straight away." : "DMO approve purchases. Points are only taken once it's approved." } }],
+        components: [{ type: 1, components: [{ type: 2, style: 3, label: instant ? "Buy now" : "Request purchase", custom_id: "mk:buy" }, { type: 2, style: 2, label: "Back", custom_id: "mk:back" }] }] });
     }
     if (id === "mk:buy") {
       // Sent for approval: nothing is taken until DMO approve it (here or on the roster's Approvals page).
@@ -3809,10 +3882,11 @@ async function marketComponent(env, i) {
       const item = ((e.fields || []).find(f => f.name === "Item") || {}).value || "";
       const u = caller(i);
       const fail = (msg) => editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.denied,
-        title: "Request not sent", description: msg || "The roster didn't answer." }],
+        title: isAutoPerk(item) ? "Not bought" : "Request not sent", description: msg || "The roster didn't answer." }],
         components: [{ type: 1, components: [{ type: 2, style: 2, label: "Back to the Market", custom_id: "mk:back" }] }] });
       const chk = await bridge(env, { action: "marketCheck", byId: u.id, byName: u.username || "", item });
       if (!chk.ok) return fail(chk.error);
+      if (isAutoPerk(chk.item)) return marketInstant(env, i, u, chk, fail);
       const content = ["**Market Purchase**", `Discord Username: ${u.username} (<@${u.id}>)`, `Roblox Username: ${chk.roblox || "—"}`,
         `Item: ${chk.item}`, `Cost: ${chk.cost} points`, `Points: ${chk.infinite ? "∞" : chk.points + (chk.spoken ? ` (${chk.spoken} already requested)` : "")}`,
         `Lasts: ${chk.lasts}` + (chk.cooldown ? ` · Cooldown: ${chk.cooldown}` : "")].join("\n");
@@ -3906,6 +3980,17 @@ async function selfTest(env) {
     else add("Discord roles", n ? "ok" : "warn", n ? n + " roles managed, none above the bot" : "no server roles match the roster");
     if (n) facts.push("Roles managed: " + n);
   });
+  if (CONFIG.GUILD_ID && (CONFIG.MARKET_AUTO_ROLES || []).length) await tryStep("Instant Market perks", async () => {
+    const shop = await hq(env, "market", null, true).catch(() => null);
+    const items = ((shop && (shop.shop || shop.items)) || []).map(x => x.name || "");
+    const bad = [];
+    for (const n of CONFIG.MARKET_AUTO_ROLES) {
+      const pr = await perkRole(env, n).catch(e => ({ error: e.message }));
+      if (pr.error) bad.push(pr.error.replace(/\*\*/g, "").replace(/\.$/, ""));
+      if (items.length && !items.some(x => perkKey(x) === perkKey(n))) bad.push(`no shop item called ${n}`);
+    }
+    add("Instant Market perks", bad.length ? "warn" : "ok", bad.length ? bad.join("; ") : CONFIG.MARKET_AUTO_ROLES.length + " perks matched to roles");
+  });
   await tryStep("Slash commands", async () => {
     const want = ["lookup"].concat(Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => REQUESTS[k].command), COMMUNITY_COMMANDS.map(c => c.name));
     const have = (await discord(env, "GET", `/applications/${CONFIG.APP_ID}/commands`)).map(c => c.name);
@@ -3939,6 +4024,7 @@ const SELFTEST_GUIDE = {
   "Role updates":            ["Approvals and roles", "Some members may have missing or out-of-date roles.", "Check the error shown. Most often the member isn't linked yet or a role sits above the bot's role."],
   "Discord channels":        ["Discord", "Logs, requests or reports can't be posted there.", "Give the bot View Channel and Send Messages in those channels, or correct the channel IDs in CONFIG."],
   "Discord roles":           ["Discord", "Those roles can't be given or removed.", "Server Settings ▸ Roles: drag the bot's role above them."],
+  "Instant Market perks":    ["Discord", "Those perks can't be bought instantly; purchases fail until fixed.", "Make the shop item and the server role names match the bot's list (MARKET_AUTO_ROLES), and keep the roles below the bot's role."],
   "Slash commands":          ["Discord", "Members can't use the missing commands.", "Open /register?key=REGISTER_KEY on the bot once."],
 };
 const SELFTEST_GROUPS = ["Connections", "Website", "Approvals and roles", "Discord"];
