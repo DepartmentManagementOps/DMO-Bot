@@ -60,7 +60,8 @@ const CONFIG = {
   HQ_PROFILE_URL: "",           // someone's HQ profile page; {emp} = their employee #, e.g. "https://…/exec?page=profile&emp={emp}"
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
   SELFTEST_CHANNEL_ID: "1565825275533730042",   // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
-  MARKET_LOG_CHANNEL_ID: "1525333050471481454",    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
+  MARKET_LOG_CHANNEL_ID: "1525333050471481454",
+  MARKET_TICKET_CHANNEL_ID: "1488308159935418479",   // #support-line: Market items that need approval ask buyers to open a Misc ticket here    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
   // Market perks that are just a Discord role: bought instantly (points taken, role given straight away, and taken
   // off again when the perk runs out). Matched to the shop item and the server role by name ("Perms" = "Permission").
   // Everything else in the shop is sent to DMO for approval.
@@ -3876,7 +3877,7 @@ async function marketComponent(env, i) {
         fields: [{ name: "Item", value: x.name, inline: true }, { name: "Cost", value: x.cost + " points", inline: true },
           { name: instant ? "Points after" : "Points after approval", value: after, inline: true }, { name: "Lasts", value: x.lasts, inline: true },
           { name: "Cooldown", value: x.cooldown || "None", inline: true }],
-        footer: { text: instant ? "Instant: the points are taken and you get the role straight away." : "DMO approve purchases. Points are only taken once it's approved." } }],
+        footer: { text: instant ? "Instant: the points are taken and you get the role straight away." : "Needs DMO approval: after requesting, open a Misc ticket in #support-line. Points are only taken once it's approved." } }],
         components: [{ type: 1, components: [{ type: 2, style: 3, label: instant ? "Buy now" : "Request purchase", custom_id: "mk:buy" }, { type: 2, style: 2, label: "Back", custom_id: "mk:back" }] }] });
     }
     if (id === "mk:buy") {
@@ -3901,7 +3902,8 @@ async function marketComponent(env, i) {
         return fail(q.error);
       }
       return editOriginal(env, i, { content: "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.approved,
-        title: "Purchase requested", description: `**${chk.item}** for ${chk.cost} points.\nDMO will review it here in Discord or on the roster's Approvals page. ` +
+        title: "Purchase requested", description: `**${chk.item}** for ${chk.cost} points.\n\n` +
+          (CONFIG.MARKET_TICKET_CHANNEL_ID ? `**Next step:** open a **Misc** ticket in <#${CONFIG.MARKET_TICKET_CHANNEL_ID}> so DMO can sort out your purchase.\n\n` : "") +
           "Points are only taken once it's approved, and you'll get a DM with the outcome.", footer: { text: "Only you can see this" } }], components: [] });
     }
   } catch (err) {
