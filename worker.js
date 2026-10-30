@@ -2082,7 +2082,7 @@ function progressBar(have, need, width) {
 function promotionText(pr) {
   if (!pr) return "";
   if (pr.merit) return "Promotion to **" + pr.next + "** is merit-based: there's no event minimum. Leadership decides.";
-  if (!pr.lines.length) return "No event requirements are set for **" + pr.next + "**.";
+  if (!pr.lines.length) return "";                                // no minimums set for this rank: nothing to show
   const met = pr.lines.filter(l => l.have >= l.need).length;
   const w = Math.max(...pr.lines.map(l => STAT_LABEL[l.f].length));
   const rows = pr.lines.map(l => STAT_LABEL[l.f].padEnd(w) + "  " + progressBar(l.have, l.need, 12) + "  " + (l.have + " / " + l.need).padStart(7) + (l.have >= l.need ? "  ✓" : ""));
