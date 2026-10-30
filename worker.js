@@ -47,6 +47,8 @@ const CONFIG = {
   REQUEST_CHANNELS: { roster: "1492261816321966291", award: "1511822488936644648", loa: "1488310011443679413" },
   // The @Department of Management Operations role (the "Ping:" line on award requests).
   DMO_ROLE_ID: "1525337433892458618",
+  // CPM staff decide LOA requests (DMO never see them): pinged when an LOA request waits 12+ hours ("" = no ping).
+  CPM_ROLE_ID: "",
 
 
   // Ping the host, co-hosts and attendees (their Discord accounts):
@@ -2861,14 +2863,19 @@ async function cronApprovalReminders(env, now) {
   const pendingIds = {};
   (res.items || []).forEach(x => { pendingIds[x.id] = true; });
   Object.keys(st).forEach(k => { if (!pendingIds[k]) delete st[k]; });
-  if (old.length) {
-    const lines = old.slice(0, 15).map(x => `• **${x.title || "Event log"}** from ${x.by || "someone"}, waiting since <t:${ts(x.at)}:R>`);
-    await discord(env, "POST", `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages`, {
-      content: `<@&${CONFIG.APPROVER_ROLE_ID}> **${old.length} waiting for more than ${CONFIG.APPROVAL_REMINDER_HOURS || 12} hours.** Please review them here or on the roster's Approvals page:\n` +
-        lines.join("\n") + (old.length > 15 ? `\n…and ${old.length - 15} more.` : ""),
-      allowed_mentions: { parse: [], roles: [CONFIG.APPROVER_ROLE_ID] } });
-    old.forEach(x => { st[x.id] = now; });
-  }
+  // LOA requests are CPM's: reminded in the LOA channel (pinging CPM_ROLE_ID), never in DMO's approvals channel.
+  const isLoa = x => /^loa-/.test(String(x.id));
+  const remind = async (list, channel, roleId, where) => {
+    if (!list.length || !channel) return;
+    const lines = list.slice(0, 15).map(x => `• **${x.title || "Event log"}** from ${x.by || "someone"}, waiting since <t:${ts(x.at)}:R>`);
+    await discord(env, "POST", `/channels/${channel}/messages`, {
+      content: (roleId ? `<@&${roleId}> ` : "") + `**${list.length} waiting for more than ${CONFIG.APPROVAL_REMINDER_HOURS || 12} hours.** Please review them ${where}:\n` +
+        lines.join("\n") + (list.length > 15 ? `\n…and ${list.length - 15} more.` : ""),
+      allowed_mentions: { parse: [], roles: roleId ? [roleId] : [] } });
+    list.forEach(x => { st[x.id] = now; });
+  };
+  await remind(old.filter(x => !isLoa(x)), CONFIG.APPROVAL_CHANNEL_ID, CONFIG.APPROVER_ROLE_ID, "here or on the roster's Approvals page");
+  await remind(old.filter(isLoa), requestChannel("loa"), CONFIG.CPM_ROLE_ID, "here or on the website's Approvals page");
   await kvPut(env, "state:approvals", st);
   return old.length ? "pinged about " + old.length : "";
 }
