@@ -39,12 +39,12 @@ const CONFIG = {
   PUBLIC_KEY: "3cb6b887519da6962dca0a4d91bb678131e42a59484f2ee2a6d7a8f10fbad3e2",
 
   APPROVER_ROLE_ID: "1525337433892458618",   // only PINGED (12-hour reminder); who may approve comes from /link + DMO on the roster
-  EVENT_LOG_CHANNEL_ID: "1554670524552970241",
-  APPROVAL_CHANNEL_ID: "1554670493993271386",
+  EVENT_LOG_CHANNEL_ID: "1488306262490742895",
+  APPROVAL_CHANNEL_ID: "1496166593779073115",
   // Where requests are posted. Leave a type "" to use REQUEST_CHANNEL_ID,
   // and leave that "" to use the approval-logs channel until you have one.
   REQUEST_CHANNEL_ID: "",
-  REQUEST_CHANNELS: { roster: "", award: "", loa: "" },
+  REQUEST_CHANNELS: { roster: "1492261816321966291", award: "1511822488936644648", loa: "1488310011443679413" },
   // The @Department of Management Operations role (the "Ping:" line on award requests).
   DMO_ROLE_ID: "1525337433892458618",
 
@@ -54,13 +54,13 @@ const CONFIG = {
   PING_IN_EVENT_LOG: true,      // again when it's approved and posted in #event-logs
 
   // ---- Community features (leave "" to switch a feature off) ----
-  GUILD_ID: "1366403142945607790",                 // your server's ID (role sync + links in score notes)
+  GUILD_ID: "1488260188413624511",                 // your server's ID (role sync + links in score notes)
   ROLE_AUTO_SYNC: true,                            // every 5 min: roles for linked members whose roster details changed
   HQ_URL: "",                   // the HQ site's public API, e.g. https://rna-hq.pages.dev/api/public (reads ?api=events, profile, hqroster, home, market)
   HQ_PROFILE_URL: "",           // someone's HQ profile page; {emp} = their employee #, e.g. "https://…/exec?page=profile&emp={emp}"
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
-  SELFTEST_CHANNEL_ID: "1554670493993271386",   // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
-  MARKET_LOG_CHANNEL_ID: "",    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
+  SELFTEST_CHANNEL_ID: "1565825275533730042",   // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
+  MARKET_LOG_CHANNEL_ID: "1525333050471481454",    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
   // Market perks that are just a Discord role: bought instantly (points taken, role given straight away, and taken
   // off again when the perk runs out). Matched to the shop item and the server role by name ("Perms" = "Permission").
   // Everything else in the shop is sent to DMO for approval.
