@@ -805,7 +805,7 @@ async function sendRequest(env, i, type, st, att) {
     const content = requestText(type, st, { id: u.id, username: u.username || "unknown", warning: check.warning }).slice(0, 2000);
     const pings = t.format.indexOf("ping") !== -1 && CONFIG.DMO_ROLE_ID ? { parse: [], roles: [CONFIG.DMO_ROLE_ID] } : NO_PINGS;
     let msg, proof = null;
-    const status = linked(env) ? [decisionRow(type)] : [];
+    const status = linked(env) ? [decisionRow(type, env)] : [];
     if (att) {
       proof = await download(att.url, att.filename);
       msg = await discordFiles(env, "POST", `/channels/${channel}/messages`,
@@ -862,8 +862,8 @@ async function syncRequest(env, b) {
   const path = `/channels/${requestChannel(type)}/messages/${String(b.id).replace(/\D/g, "")}`;
   const who = String(b.by || "a roster editor").replace(/@.*$/, "");
   let row = null, dmText = null, colour = CONFIG.COLOURS.approved;
-  if (b.status === "Claimed") row = claimedRow(type, "web", `${b.by || "someone"} (roster)`);
-  if (b.status === "Released") row = decisionRow(type);
+  if (b.status === "Claimed") row = type === "award" ? websiteRow(env, `Claimed by ${b.by || "someone"} (website)`) : claimedRow(type, "web", `${b.by || "someone"} (roster)`);
+  if (b.status === "Released") row = decisionRow(type, env);
   if (b.status === "Approved") row = statusRow(`Approved by ${who}. Adding to the roster…`, "⏳");
   if (b.status === "Done") {
     row = statusRow(`Approved by ${who}`, "✅");
@@ -1366,7 +1366,7 @@ async function submit(env, i, draft, who) {
     const embed = card(log, "pending", { submitterId: who.id, submittedAt: Date.now(), check: rosterCheck(log, check), proofImage: "attachment://" + proof.name });
     const content = fitContent(subtextLog(mentionLog(log, ids)), log);
     const msg = await discordFiles(env, "POST", `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages`, {
-      content: content, embeds: [embed], components: linked(env) ? [decisionRow("event")] : [pendingRow()],
+      content: content, embeds: [embed], components: linked(env) ? [decisionRow("event", env)] : [pendingRow()],
       allowed_mentions: CONFIG.PING_IN_APPROVAL_LOG ? pingsIn(content) : NO_PINGS,
       attachments: [{ id: 0, filename: proof.name }]
     }, [proof]);
@@ -1416,7 +1416,7 @@ function rosterCheck(log, check) {
 async function syncFromRoster(env, b) {
   const path = `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages/${b.id}`;
   if (b.status === "Claimed" || b.status === "Released") {     // claimed / released on the roster's Approvals page
-    await discord(env, "PATCH", path, { components: [b.status === "Claimed" ? claimedRow("event", "web", `${b.by || "someone"} (roster)`) : decisionRow("event")],
+    await discord(env, "PATCH", path, { components: [b.status === "Claimed" ? claimedRow("event", "web", `${b.by || "someone"} (roster)`) : decisionRow("event", env)],
       allowed_mentions: NO_PINGS }).catch(() => {});
     return;
   }
@@ -2327,7 +2327,17 @@ async function robloxUser(username) {
 // ---- Approve / Deny in Discord: event logs + award / roster / LOA requests (DMO, linked) ----
 // Step 1: someone (DMO) has to Claim it. Approve / Deny only appear once it's
 // claimed, and only the claimer can use them (claims last 30 minutes).
-function decisionRow(type) {
+// Award requests are decided by admins on the website's Approvals page only: their message gets a link there.
+const AWARD_WEBSITE_ONLY = "Award requests can only be approved or denied by admins, on the website's Approvals page.";
+function websiteRow(env, label) {
+  const base = siteBase(env);
+  return { type: 1, components: [
+    base ? { type: 2, style: 5, label: "Open the Approvals page", url: base + "/edit/approvals" }
+         : { type: 2, style: 2, label: "Decided on the website", custom_id: "status-web", disabled: true },
+    { type: 2, style: 2, label: (label || "Admins decide this on the website").slice(0, 80), custom_id: "status", disabled: true, emoji: { name: "🔒" } }] };
+}
+function decisionRow(type, env) {
+  if (type === "award") return websiteRow(env);
   return { type: 1, components: [
     { type: 2, style: 1, label: "Claim", custom_id: "rq:claim:" + type, emoji: { name: "🙋" } },
     { type: 2, style: 2, label: "Claim before approving or denying", custom_id: "status", disabled: true }] };
@@ -2359,7 +2369,7 @@ async function claimAction(env, i, kind, release) {
       return followup(env, i, res.error || "Couldn't claim it.");
     }
     await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`, {
-      components: [release ? decisionRow(kind) : claimedRow(kind, u.id, callerName(i))], allowed_mentions: NO_PINGS });
+      components: [release ? decisionRow(kind, env) : claimedRow(kind, u.id, callerName(i))], allowed_mentions: NO_PINGS });
   } catch (e) {
     await followup(env, i, "Couldn't do that: " + e.message);
   }
@@ -2368,6 +2378,10 @@ async function claimAction(env, i, kind, release) {
 function requestDecisionAction(env, ctx, i) {
   const [, act, kind, claimer] = i.data.custom_id.split(":");
   if (!REQUESTS[kind] && kind !== "event" && kind !== "market") return reply("Unknown request type.");
+  if (kind === "award") {                     // an older message: swap its buttons for the website link
+    ctx.waitUntil(discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`, { components: [websiteRow(env)], allowed_mentions: NO_PINGS }).catch(() => {}));
+    return reply(AWARD_WEBSITE_ONLY);
+  }
   // Known not allowed -> say so now. Unknown -> carry on; it's checked before anything is recorded.
   const known = cachedReviewer(caller(i).id);
   if (known && !mayDecide(known, kind)) return reply(decideReason(known, kind));
@@ -2377,7 +2391,7 @@ function requestDecisionAction(env, ctx, i) {
     return { type: R.DEFER_UPDATE };
   }
   // Older messages (Approve / Deny without a claim): switch them to the Claim step.
-  if (!claimer) return { type: R.UPDATE, data: { components: [decisionRow(kind)] } };
+  if (!claimer) return { type: R.UPDATE, data: { components: [decisionRow(kind, env)] } };
   if (claimer === "web") return reply("This was claimed on the roster's Approvals page. It must be decided there, or released first.");
   if (claimer !== caller(i).id) return reply(`Claimed by <@${claimer}>. Only they can approve or deny it. Claims expire after 30 minutes; you can then press **Release** and claim it yourself.`);
   const title = kind === "event" ? "event log" : kind === "market" ? "Market purchase" : REQUESTS[kind].title;
@@ -2428,7 +2442,7 @@ async function decideRequest(env, i, kind, decision, extra) {
     }
     if (res.needClaim || res.claimedBy) {
       // Claim missing / taken: put the Claim step back so it's clear.
-      await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`, { components: [decisionRow(kind)], allowed_mentions: NO_PINGS }).catch(() => {});
+      await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`, { components: [decisionRow(kind, env)], allowed_mentions: NO_PINGS }).catch(() => {});
       return followup(env, i, res.error);
     }
     return followup(env, i, "Couldn't record that on the roster: " + res.error + ". Nothing was changed.");
@@ -3690,7 +3704,7 @@ async function marketComponent(env, i) {
       const content = ["**Market Purchase**", `Discord Username: ${u.username} (<@${u.id}>)`, `Roblox Username: ${chk.roblox || "—"}`,
         `Item: ${chk.item}`, `Cost: ${chk.cost} points`, `Points: ${chk.infinite ? "∞" : chk.points + (chk.spoken ? ` (${chk.spoken} already requested)` : "")}`,
         `Lasts: ${chk.lasts}` + (chk.cooldown ? ` · Cooldown: ${chk.cooldown}` : "")].join("\n");
-      const msg = await discord(env, "POST", `/channels/${requestChannel("market")}/messages`, { content, allowed_mentions: NO_PINGS, components: [decisionRow("market")] });
+      const msg = await discord(env, "POST", `/channels/${requestChannel("market")}/messages`, { content, allowed_mentions: NO_PINGS, components: [decisionRow("market", env)] });
       const q = await bridge(env, { action: "request", id: "market-" + msg.id, title: "Market Purchase", details: { item: chk.item },
         submittedBy: callerName(i), submittedById: u.id, byName: u.username || "" }).catch(err => ({ ok: false, error: err.message }));
       if (!q.ok) {
