@@ -47,6 +47,7 @@ const CONFIG = {
   REQUEST_CHANNELS: { roster: "1492261816321966291", award: "1511822488936644648", loa: "1488310011443679413" },
   // The @Department of Management Operations role (the "Ping:" line on award requests).
   DMO_ROLE_ID: "1525337433892458618",
+  AWARD_PING_ROLE_ID: "1530688776547074198",   // pinged on new award requests (the "Ping:" line); "" = DMO_ROLE_ID
   // CPM staff decide LOA requests (DMO never see them): pinged when an LOA request waits 12+ hours ("" = no ping).
   CPM_ROLE_ID: "",
 
@@ -773,7 +774,7 @@ function requestText(type, st, submitter) {
         (st.robloxChecked ? " · Roblox account verified" : ""));
       lines.push("Proof:");
     }
-    else if (key === "ping") lines.push(`Ping: <@&${CONFIG.DMO_ROLE_ID}>`);
+    else if (key === "ping") lines.push(`Ping: <@&${CONFIG.AWARD_PING_ROLE_ID || CONFIG.DMO_ROLE_ID}>`);
     else if (key === "tz") lines.push(`${t.labels.tz}: ${show(cleanTimezone(cleanLine(st.tz, 12)))}`);
     else lines.push(`${t.labels[key]}: ${show(st[key], key === "ref" || key === "notes" ? "None" : "—")}`);
   });
@@ -815,7 +816,8 @@ async function sendRequest(env, i, type, st, att) {
     const title = type === "roster" && st.mode === "update" ? t.updateTitle : t.title;
     st.hasProof = !!att;
     const content = requestText(type, st, { id: u.id, username: u.username || "unknown", warning: check.warning }).slice(0, 2000);
-    const pings = t.format.indexOf("ping") !== -1 && CONFIG.DMO_ROLE_ID ? { parse: [], roles: [CONFIG.DMO_ROLE_ID] } : NO_PINGS;
+    const pingRole = CONFIG.AWARD_PING_ROLE_ID || CONFIG.DMO_ROLE_ID;
+    const pings = t.format.indexOf("ping") !== -1 && pingRole ? { parse: [], roles: [pingRole] } : NO_PINGS;
     let msg, proof = null;
     const status = linked(env) ? [decisionRow(type, env)] : [];
     if (att) {
