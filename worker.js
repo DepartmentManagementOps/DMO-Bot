@@ -1799,12 +1799,14 @@ const evKey = (e) => e.start + "|" + String(e.title).toLowerCase();
 
 function eventEmbed(e, heading, colour) {
   const s = ts(e.start);
+  const sup = (String(e.description || "").match(/^Supervisor: (.+)$/m) || [])[1] || "";
+  const details = String(e.description || "").replace(/^Supervisor: .+\n?/m, "").trim();
   const fields = [
-    { name: "Host", value: e.host || "—", inline: true },
-    { name: "Length", value: e.minutes ? fmtMins(e.minutes) : "—", inline: true },
-    { name: "Starts", value: `<t:${s}:F>\n<t:${s}:R>`, inline: true }
-  ];
-  if (e.description) fields.push({ name: "Details", value: e.description.slice(0, 1024), inline: false });
+    { name: "Starts", value: `<t:${s}:F>\n<t:${s}:R>`, inline: false },
+    { name: "Host", value: e.host || "—", inline: true }]
+    .concat(sup ? [{ name: "Supervisor", value: sup, inline: true }] : [],
+      [{ name: "Length", value: e.minutes ? fmtMins(e.minutes) : "—", inline: true }]);
+  if (details) fields.push({ name: "Details", value: details.slice(0, 1024), inline: false });
   return { author: { name: CONFIG.NAME }, color: colour || CONFIG.COLOURS.info, title: e.title,
     description: heading || "", fields: fields, footer: { text: "Times show in your own timezone" } };
 }
@@ -1995,14 +1997,22 @@ async function eventSchedule(env, i, o) {
     const when = parseWhen(o.date, o.time, tz);
     if (when.error) return editOriginal(env, i, { content: when.error, components: tzRow, allowed_mentions: NO_PINGS });
     if (when.ms < Date.now() + 60000) return editOriginal(env, i, { content: `That's in the past (<t:${ts(when.ms)}:F>). Check the date, time and time zone (${zoneLabel(tz, when.ms)}, ${from}).`, components: tzRow, allowed_mentions: NO_PINGS });
-    const minutes = Math.round(Number(o.length) || 0);
+    const minutes = Math.round(Number(o.length) || 60);
     if (minutes < 5 || minutes > 720) return editReply(env, i, "The length must be between 5 and 720 minutes.");
     let host = cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i));
     const hp = roster && roster.by[host.replace(/^@/, "").toLowerCase()];
     if (o.host && roster && !hp) return editReply(env, i, `**Host:** ${host} isn't on the roster.`);
     if (hp) host = hp.r || hp.d;
+    // Supervisor (optional): someone on the roster, picked as a Discord member.
+    let supervisor = "";
+    if (o.supervisor) {
+      const sv = await rosterNameForUser(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || o.__supName || ""));
+      if (!sv) return editOriginal(env, i, { content: "**Supervisor:** they aren't on the roster (or linked with /link). Pick someone on the roster, or leave it empty.", embeds: [], components: tzRow, allowed_mentions: NO_PINGS });
+      supervisor = sv;
+    }
+    // The supervisor is kept as the description's first line ("Supervisor: name"), so the website shows it too.
     const e = { start: when.ms, minutes: minutes, title: cleanLine(o.title, 100), host: host, hostEmp: hp ? (hp.e || "") : "",
-                description: String(o.description || "").trim().slice(0, 1000) };
+                description: ((supervisor ? "Supervisor: " + supervisor + "\n" : "") + String(o.description || "").trim()).slice(0, 1000) };
     const u = caller(i);
     const res = await bridge(env, { action: "scheduleEvent", id: "ev-" + i.id, event: e, byId: u.id, byName: u.username || "" })
       .catch(err => ({ ok: false, error: err.message }));
@@ -2037,25 +2047,26 @@ function eventScheduleButton(env, ctx, i) {
   return { type: R.DEFER_UPDATE };
 }
 
-// ---- /event schedule form: pick the type, the day and a free start time (no typing) ----
-// State lives in the components' custom_ids ("evp:<action>:<type>~<day>~<HHMM>~<minutes>~<from>~<zone>");
-// title, host and details in the form's own fields. Free times use the same rule as the website: an hour
-// between the end of one event and the start of the next.
+// ---- /event schedule form: three short steps, nothing to type ----
+//   1. What and when: event type + day          2. Start time: only free times (an hour clear of other events)
+//   3. Check and book: summary, optional supervisor (a server member on the roster), length / title / details
+// State lives in the components' custom_ids ("evp:<action>:<type>~<day>~<HHMM>~<min>~<supervisor id>~<step>~<from>~<zone>");
+// title, host and details in the message's own fields.
 const EVP_GAP = 3600000, EVP_DAYS = 14, EVP_STEP = 30;
-const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || 60, st.f || "", st.z || ""].join("~");
-function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || 60, f: p[4] || "", z: p.slice(5).join("~") }; }
+const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || 60, st.s || "", st.p || 1, st.f || "", st.z || ""].join("~");
+function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || 60, s: p[4] || "", p: +p[5] || 1, f: p[6] || "", z: p.slice(7).join("~") }; }
 const EVP_FROM = { d: "your device", r: "your roster time zone", t: "as typed", u: "no time zone saved" };
 function tzOff(tz, ms) { const f = tzOffsetMinutes(tz); if (f !== null) return f; const z = validZone(tz); return z ? zoneOffset(z, ms) : 0; }
 function wallToMs(tz, y, mo, d, h, mi) { const wall = Date.UTC(y, mo - 1, d, h, mi); let ms = wall - tzOff(tz, wall) * 60000; return wall - tzOff(tz, ms) * 60000; }
 function dayKeyAt(tz, ms) { const t = new Date(ms + tzOff(tz, ms) * 60000); return t.getUTCFullYear() + String(t.getUTCMonth() + 1).padStart(2, "0") + String(t.getUTCDate()).padStart(2, "0"); }
 const dayParts = k => ({ y: +k.slice(0, 4), mo: +k.slice(4, 6), d: +k.slice(6, 8) });
 function evpDays(tz) {
-  const out = [], today = dayKeyAt(tz, Date.now()), p = dayParts(today);
+  const out = [], p = dayParts(dayKeyAt(tz, Date.now()));
   for (let k = 0; k < EVP_DAYS; k++) {
     const dt = new Date(Date.UTC(p.y, p.mo - 1, p.d + k, 12));
     const key = dt.toISOString().slice(0, 10).replace(/-/g, "");
-    const name = dt.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
-    out.push({ key, label: k === 0 ? "Today · " + name : k === 1 ? "Tomorrow · " + name : name });
+    const name = dt.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" });
+    out.push({ key, label: k === 0 ? "Today" : k === 1 ? "Tomorrow" : name.split(" ")[0], description: name });
   }
   return out;
 }
@@ -2072,44 +2083,60 @@ function evpFree(tz, dayKey, minutes, busy) {
   return out;
 }
 async function evpBusy(env) { const r = await bridge(env, { action: "eventsBusy" }).catch(() => null); return r && Array.isArray(r.events) ? r.events : []; }
-/** The form's fields that aren't in the state: title, host, details (read back from the form message). */
+/** A Discord member's roster name (through their /link, else their username), or "". */
+async function rosterNameForUser(env, roster, userId, username) {
+  const l = await bridge(env, { action: "links", discordId: userId }).catch(() => null);
+  const emp = l && l.ok && (l.links || [])[0] && l.links[0].emp;
+  const find = r => r ? ((emp && r.list.find(x => normEmp(x.e) === normEmp(emp))) || (username && r.by[String(username).toLowerCase()])) : null;
+  let p = find(roster);
+  if (!p) p = find(await loadRoster(env, 0).catch(() => null));   // just added to the roster: fetch it again
+  return p ? (p.r || p.d) : "";
+}
+/** Title, host, supervisor name and details, read back from the form message. */
 function evpFields(message) {
-  const f = {}; (((message || {}).embeds || [])[0] || {}).fields && message.embeds[0].fields.forEach(x => { f[x.name] = x.value; });
-  const v = k => (f[k] && f[k] !== "—" ? f[k] : "");
-  return { title: v("Title"), host: v("Host"), details: v("Details") };
+  const f = {}; ((((message || {}).embeds || [])[0] || {}).fields || []).forEach(x => { f[x.name] = x.value; });
+  const v = k => (f[k] && f[k] !== "—" && f[k] !== "None" ? f[k] : "");
+  return { title: v("Title"), host: v("Host"), sup: v("Supervisor"), details: v("Details") };
 }
 function evpView(st, x, busy, note) {
   const days = evpDays(st.z), free = st.d ? evpFree(st.z, st.d, st.m, busy) : [];
-  if (st.h && !free.some(t => t.hhmm === st.h)) st.h = "";                 // no longer free (taken, or too long now)
+  if (st.h && !free.some(t => t.hhmm === st.h)) { st.h = ""; if (st.p === 3) st.p = 2; }   // taken, or too long now
   const chosen = st.h ? free.find(t => t.hhmm === st.h) : null;
-  const enc = evpEnc(st), dayName = st.d ? ((days.find(d => d.key === st.d) || {}).label || st.d) : "";
-  const fields = [
-    { name: "Type", value: st.t !== null ? EVENT_TYPES[st.t] : "—", inline: true },
-    { name: "Day", value: dayName || "—", inline: true },
-    { name: "Start", value: chosen ? `${chosen.label} (<t:${ts(chosen.ms)}:R>)` : "—", inline: true },
-    { name: "Length", value: fmtMins(st.m), inline: true },
-    { name: "Host", value: x.host || "—", inline: true },
-    { name: "Title", value: x.title || "—", inline: true },
-    { name: "Details", value: x.details ? x.details.slice(0, 1000) : "—", inline: false }];
-  const timeSelect = (id, list, empty) => ({ type: 1, components: [list.length
-    ? { type: 3, custom_id: "evp:" + id + ":" + enc, placeholder: id === "am" ? "Start time before 12:00" : "Start time from 12:00",
-        options: list.slice(0, 25).map(t => ({ label: t.label, value: t.hhmm, default: t.hhmm === st.h })) }
-    : { type: 3, custom_id: "evp:" + id + ":" + enc, placeholder: empty, disabled: true, options: [{ label: "none", value: "none" }] }] });
-  const am = free.filter(t => t.hhmm < "1200"), pm = free.filter(t => t.hhmm >= "1200");
-  const ready = st.t !== null && chosen && x.title;
-  if (!note && st.t !== null && !x.title) note = "Press **Length, title & details** to name this event.";
-  return { content: note || "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "Book an event",
-    description: `Pick the type, the day and a free start time. Times are in **${zoneLabel(st.z, chosen ? chosen.ms : Date.now())}** (${EVP_FROM[st.f] || "your time zone"}).` +
-      "\n-# Only times with at least an hour's gap from other events are shown.", fields, footer: { text: "Only you can see this" } }],
-    components: [
-      { type: 1, components: [{ type: 3, custom_id: "evp:type:" + enc, placeholder: "Event type", options: EVENT_TYPES.map((t, k) => ({ label: t, value: String(k), default: st.t === k })) }] },
-      { type: 1, components: [{ type: 3, custom_id: "evp:day:" + enc, placeholder: "Day", options: days.map(d => ({ label: d.label, value: d.key, default: d.key === st.d })) }] },
-      timeSelect("am", am, st.d ? "No free times before 12:00" : "Pick a day first"),
-      timeSelect("pm", pm, st.d ? "No free times from 12:00" : "Pick a day first"),
-      { type: 1, components: [
-        { type: 2, style: 3, label: "Book event", custom_id: "evp:book:" + enc, disabled: !ready },
-        { type: 2, style: 2, label: "Length, title & details", custom_id: "evp:more:" + enc },
-        { type: 2, style: 2, label: "Cancel", custom_id: "evp:cancel:" + enc }] }] };
+  const day = st.d ? days.find(d => d.key === st.d) : null;
+  const enc = () => evpEnc(st), btn = (label, act, style, disabled) => ({ type: 2, style, label, custom_id: "evp:" + act + ":" + enc(), disabled: !!disabled });
+  const zoneLine = `-# Times are in ${zoneLabel(st.z, chosen ? chosen.ms : Date.now())} (${EVP_FROM[st.f] || "your time zone"}).`;
+  const sofar = [st.t !== null ? `**${EVENT_TYPES[st.t]}**` : "", day ? day.description : "", chosen ? chosen.label : ""].filter(Boolean).join(" · ");
+  // Kept on every step (the form reads them back), shown in full on step 3.
+  const keep = [{ name: "Title", value: x.title || "—", inline: true }, { name: "Host", value: x.host || "—", inline: true },
+    { name: "Supervisor", value: x.sup || "None", inline: true }].concat(x.details ? [{ name: "Details", value: x.details.slice(0, 1000), inline: false }] : []);
+  const embed = { author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, footer: { text: `Step ${st.p} of 3 · Only you can see this` } };
+  let rows;
+  if (st.p === 1) {
+    Object.assign(embed, { title: "Book an event", description: "Choose the type of event and the day." + (sofar ? "\n\n" + sofar : "") + "\n" + zoneLine, fields: keep });
+    rows = [
+      { type: 1, components: [{ type: 3, custom_id: "evp:type:" + enc(), placeholder: "Type of event", options: EVENT_TYPES.map((t, k) => ({ label: t, value: String(k), default: st.t === k })) }] },
+      { type: 1, components: [{ type: 3, custom_id: "evp:day:" + enc(), placeholder: "Day", options: days.map(d => ({ label: d.label, description: d.description, value: d.key, default: d.key === st.d })) }] },
+      { type: 1, components: [btn("Next: start time", "to2", 1, st.t === null || !st.d), btn("Cancel", "cancel", 2)] }];
+  } else if (st.p === 2) {
+    const am = free.filter(t => t.hhmm < "1200"), pm = free.filter(t => t.hhmm >= "1200");
+    const sel = (id, list, ph, empty) => ({ type: 1, components: [list.length
+      ? { type: 3, custom_id: "evp:" + id + ":" + enc(), placeholder: ph, options: list.slice(0, 25).map(t => ({ label: t.label, value: t.hhmm, default: t.hhmm === st.h })) }
+      : { type: 3, custom_id: "evp:" + id + ":" + enc(), placeholder: empty, disabled: true, options: [{ label: "none", value: "none" }] }] });
+    Object.assign(embed, { title: "Choose a start time", description: sofar + `\n\nOnly free times are listed: at least an hour clear of other events, for a ${fmtMins(st.m)} event.` +
+      (free.length ? "" : "\n**Nothing is free that day.** Go back and pick another day.") + "\n" + zoneLine, fields: keep });
+    rows = [sel("am", am, "Morning (before 12:00)", "No free morning times"), sel("pm", pm, "Afternoon and evening (from 12:00)", "No free times from 12:00"),
+      { type: 1, components: [btn("Next: check and book", "to3", 1, !chosen), btn("Back", "to1", 2), btn("Cancel", "cancel", 2)] }];
+  } else {
+    Object.assign(embed, { title: "Check and book", description: zoneLine.replace("-# ", ""), fields: [
+      { name: "Event", value: st.t !== null ? EVENT_TYPES[st.t] : "—", inline: true },
+      { name: "Starts", value: chosen ? `<t:${ts(chosen.ms)}:F>\n<t:${ts(chosen.ms)}:R>` : "—", inline: true },
+      { name: "Length", value: fmtMins(st.m), inline: true }].concat(keep) });
+    rows = [
+      { type: 1, components: [{ type: 5, custom_id: "evp:sup:" + enc(), placeholder: x.sup ? "Supervisor: " + x.sup : "Supervisor (only if the event needs one)", min_values: 0, max_values: 1 }] },
+      { type: 1, components: [btn("Book event", "book", 3, !chosen || !x.title), btn("Change length, title or details", "more", 2), btn("Back", "to2", 2), btn("Cancel", "cancel", 2)] }];
+  }
+  if (!note && st.t !== null && !x.title && st.p === 3) note = "This event needs a title: press **Change length, title or details**.";
+  return { content: note || "", allowed_mentions: NO_PINGS, embeds: [embed], components: rows };
 }
 /** Opens the form (after the time zone check, which eventSchedule's prompt handles). */
 async function evpOpen(env, i, o) {
@@ -2123,8 +2150,12 @@ async function evpOpen(env, i, o) {
     if (o.timezone && !typed) return editReply(env, i, `"${o.timezone}" isn't a time zone. Pick one from the list, or leave it empty.`);
     if (!typed && !dev && o.__tz !== "roster" && env.BOT_KV && env.SHEETS_SECRET) return eventSchedule(env, i, o);   // asks for the time zone first
     const z = typed || dev || (me && me.z ? cleanTimezone(me.z) : "UTC");
-    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || 60)), f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
-    const x = { title: cleanLine(o.title, 100), host: cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i)), details: String(o.description || "").trim().slice(0, 1000) };
+    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || 60)), s: "", p: 1, f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
+    const x = { title: cleanLine(o.title, 100), host: cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i)), sup: "", details: String(o.description || "").trim().slice(0, 1000) };
+    if (o.supervisor) {
+      const name = await rosterNameForUser(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || ""));
+      if (name) { st.s = String(o.supervisor); x.sup = name; }
+    }
     return editOriginal(env, i, evpView(st, x, await evpBusy(env)));
   } catch (err) {
     await editReply(env, i, "Couldn't open the booking form: " + err.message).catch(() => {});
@@ -2137,7 +2168,7 @@ function evpAction(env, ctx, i) {
   if (act === "more") {
     const box = (id, label, style, max, value, required, ph) => ({ type: 18, label, component: Object.assign({ type: 4, custom_id: id, style, max_length: max, required, placeholder: ph }, value ? { value: String(value) } : {}) });
     return { type: R.MODAL, data: { custom_id: "evp:form:" + evpEnc(st), title: "Length, title & details", components: [
-      box("title", "Title", 1, 100, x.title || (st.t !== null ? EVENT_TYPES[st.t] : ""), true, "e.g. Patrol"),
+      box("title", "Title", 1, 100, x.title || (st.t !== null && EVENT_TYPES[st.t] !== "Other" ? EVENT_TYPES[st.t] : ""), true, "e.g. Patrol"),
       box("length", "Length in minutes", 1, 3, st.m, true, "60"),
       box("host", "Host (roster name)", 1, 60, x.host, false, "Leave empty for yourself"),
       box("details", "Details", 2, 1000, x.details, false, "What it's about (optional)")] } };
@@ -2149,10 +2180,20 @@ function evpAction(env, ctx, i) {
       const old = st.t !== null ? EVENT_TYPES[st.t] : "";
       st.t = Math.max(0, Math.min(EVENT_TYPES.length - 1, +v || 0));
       if (!x.title || x.title === old) x.title = EVENT_TYPES[st.t] === "Other" ? "" : EVENT_TYPES[st.t];
-      if (!x.title) note = "Press **Length, title & details** to name this event.";
     }
-    if (act === "day") { st.d = /^\d{8}$/.test(v || "") ? v : ""; }
+    if (act === "day") { st.d = /^\d{8}$/.test(v || "") ? v : ""; st.h = ""; }
     if (act === "am" || act === "pm") st.h = /^\d{4}$/.test(v || "") ? v : "";
+    if (act === "to1") st.p = 1;
+    if (act === "to2") st.p = 2;
+    if (act === "to3") st.p = 3;
+    if (act === "sup") {
+      if (!v) { st.s = ""; x.sup = ""; }
+      else {
+        const roster = await loadRoster(env).catch(() => null);
+        const name = await rosterNameForUser(env, roster, v, String(((((i.data || {}).resolved || {}).users || {})[v] || {}).username || ""));
+        if (name) { st.s = v; x.sup = name; } else note = `<@${v}> isn't on the roster (or linked with /link), so they can't supervise.`;
+      }
+    }
     if (act === "form") {
       const f = modalValues(i);
       const len = Math.round(Number(f.length));
@@ -2164,13 +2205,17 @@ function evpAction(env, ctx, i) {
     }
     const busy = await evpBusy(env);
     if (act === "book") {
-      const view = evpView(Object.assign({}, st), x, busy);
-      const p = dayParts(st.d || "00000000");
-      if (!st.h || view.components[4].components[0].disabled) return editOriginal(env, i, evpView(st, x, busy, "That start time has just been taken. Pick another."));
+      const stillFree = st.d && evpFree(st.z, st.d, st.m, busy).some(t => t.hhmm === st.h);
+      if (!st.h || !stillFree) return editOriginal(env, i, evpView(st, x, busy, "That start time has just been taken. Pick another."));
+      if (!x.title) return editOriginal(env, i, evpView(st, x, busy));
+      const p = dayParts(st.d);
       return eventSchedule(env, i, { title: x.title, date: `${p.y}-${String(p.mo).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`,
-        time: st.h.slice(0, 2) + ":" + st.h.slice(2), length: st.m, timezone: st.z, host: x.host, description: x.details, __from: EVP_FROM[st.f] });
+        time: st.h.slice(0, 2) + ":" + st.h.slice(2), length: st.m, timezone: st.z, host: x.host, description: x.details,
+        supervisor: st.s || "", __supName: x.sup, __from: EVP_FROM[st.f] });
     }
-    return editOriginal(env, i, evpView(st, x, busy, note));
+    const view = evpView(st, x, busy, note);
+    if (act === "form" && st.p === 2 && !note) view.content = "That length doesn't fit the time you picked any more. Choose another start time.";
+    return editOriginal(env, i, view);
   })().catch(err => followup(env, i, "Couldn't do that: " + err.message)));
   return { type: R.DEFER_UPDATE };
 }
@@ -3513,7 +3558,8 @@ const COMMUNITY_COMMANDS = [
       { type: 4, name: "length", description: "Optional: length in minutes (default 60)", required: false, min_value: 5, max_value: 720 },
       { type: 3, name: "timezone", description: "The time zone you typed the time in (default: your device's, else your roster one)", required: false, autocomplete: true, max_length: 40 },
       { type: 3, name: "host", description: "Host (default: you)", required: false, autocomplete: true, max_length: 60 },
-      { type: 3, name: "description", description: "What it's about", required: false, max_length: 1000 }] },
+      { type: 3, name: "description", description: "What it's about", required: false, max_length: 1000 },
+      { type: 6, name: "supervisor", description: "Supervisor, if the event needs one", required: false }] },
     { type: 1, name: "cancel", description: "Cancel an event you booked", options: [
       { type: 3, name: "event", description: "Start typing the event's name", required: true, autocomplete: true }] },
     { type: 1, name: "log", description: "Log an event for approval", options: [
