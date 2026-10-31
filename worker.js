@@ -430,6 +430,11 @@ async function handle(i, env, ctx) {
     const draft = readDraft(i.message);
 
     if (action === "cancel") return { type: R.UPDATE, data: { content: "", embeds: [{ color: CONFIG.COLOURS.denied, description: "Event log cancelled. Nothing was sent." }], components: [] } };
+    if (action === "dap") {
+      draft.doubleAP = !draft.doubleAP;
+      ctx.waitUntil((async () => editOriginal(env, i, panel(draft, await loadRoster(env).catch(() => null))))().catch(() => {}));
+      return { type: R.DEFER_UPDATE };
+    }
 
     if (action === "host" || action === "sup" || action === "co" || action === "att") {
       ctx.waitUntil(pickMembers(env, i, draft, action));
@@ -1174,7 +1179,8 @@ async function eventLogStart(env, ctx, opts, i) {
   }
   const draft = blankDraft();
   draft.event = eventLabel(type, other);
-  draft.doubleAP = opts.double_ap === true;
+  // Double AP: on by default at the weekend (Friday 18:00 to Monday 06:00 UTC); the Double AP button changes it.
+  draft.doubleAP = opts.double_ap === true || (opts.double_ap === undefined && dapWindow(Date.now()));
   // Host = you, to start with (change it in the Host menu).
   const me = (i && i.member && i.member.user) || (i && i.user) || null;
   if (me && me.id) { draft.host = rosterNameFor(roster, me, i.member).name; draft.hostIds = [me.id]; }
@@ -1297,6 +1303,7 @@ function panel(d, roster) {
       { type: 1, components: [
         { type: 2, style: detailsDone ? 2 : 1, label: detailsDone ? "Edit details" : "Event details", custom_id: "d:details", emoji: { name: "📝" } },
         { type: 2, style: d.proof ? 2 : 1, label: d.proof ? "Change proof" : "Add proof", custom_id: "d:proof", emoji: { name: "📎" } },
+        { type: 2, style: d.doubleAP ? 1 : 2, label: d.doubleAP ? "Double AP: on" : "Double AP: off", custom_id: "d:dap", emoji: { name: "✨" } },
         { type: 2, style: 3, label: "Submit", custom_id: "d:submit", emoji: { name: "📨" }, disabled: done !== steps.length },
         { type: 2, style: 4, label: "Cancel", custom_id: "d:cancel" }
       ] }
@@ -3578,7 +3585,7 @@ const COMMUNITY_COMMANDS = [
         { type: 3, name: "type", description: "What kind of event it was", required: true,
           choices: EVENT_TYPES.map(t => ({ name: t, value: t })) },
         { type: 3, name: "other", description: "Only for Other: what the event was (up to 60 characters)", required: false, max_length: 60 },
-        { type: 5, name: "double_ap", description: "Double AP event? Attendees get double (default: no)", required: false }] },
+        { type: 5, name: "double_ap", description: "Double AP? Default: on at weekends (Fri 18:00 to Mon 06:00 UTC), else off", required: false }] },
     { type: 1, name: "list", description: "Upcoming events, in your own time", options: [
       { type: 5, name: "share", description: "Post it in the channel for everyone (default: only you see it)", required: false }] }] },
   { name: "profile", description: "Someone's public profile", dm_permission: false, options: [
@@ -3944,6 +3951,8 @@ function cleanLine(s, max) { return String(s || "").replace(/\s+/g, " ").trim().
 function cleanList(s) {
   return uniq(String(s || "").split(/[\n,]+/).map(x => x.trim().replace(/^@/, "").trim()).filter(Boolean)).slice(0, 150);
 }
+// Double AP weekend: Friday 18:00 to Monday 06:00 UTC (the website applies the same rule when approving).
+function dapWindow(ms) { const d = new Date(ms), day = d.getUTCDay(), m = d.getUTCHours() * 60 + d.getUTCMinutes(); return day === 6 || day === 0 || (day === 5 && m >= 1080) || (day === 1 && m < 360); }
 function today() {
   return new Intl.DateTimeFormat("en-GB", { timeZone: CONFIG.TIME_ZONE, day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date());
 }
