@@ -1997,7 +1997,7 @@ async function eventSchedule(env, i, o) {
     const when = parseWhen(o.date, o.time, tz);
     if (when.error) return editOriginal(env, i, { content: when.error, components: tzRow, allowed_mentions: NO_PINGS });
     if (when.ms < Date.now() + 60000) return editOriginal(env, i, { content: `That's in the past (<t:${ts(when.ms)}:F>). Check the date, time and time zone (${zoneLabel(tz, when.ms)}, ${from}).`, components: tzRow, allowed_mentions: NO_PINGS });
-    const minutes = Math.round(Number(o.length) || 60);
+    const minutes = Math.round(Number(o.length) || 30);
     if (minutes < 5 || minutes > 720) return editReply(env, i, "The length must be between 5 and 720 minutes.");
     let host = cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i));
     const hp = roster && roster.by[host.replace(/^@/, "").toLowerCase()];
@@ -2052,9 +2052,9 @@ function eventScheduleButton(env, ctx, i) {
 //   3. Check and book: summary, optional supervisor (a server member on the roster), length / title / details
 // State lives in the components' custom_ids ("evp:<action>:<type>~<day>~<HHMM>~<min>~<supervisor id>~<step>~<from>~<zone>");
 // title, host and details in the message's own fields.
-const EVP_GAP = 3600000, EVP_DAYS = 14, EVP_STEP = 30;
-const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || 60, st.s || "", st.p || 1, st.f || "", st.z || ""].join("~");
-function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || 60, s: p[4] || "", p: +p[5] || 1, f: p[6] || "", z: p.slice(7).join("~") }; }
+const EVP_GAP = 3600000, EVP_DAYS = 14, EVP_STEP = 30, EVP_LEN = 30;   // EVP_LEN: default event length (minutes)
+const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || EVP_LEN, st.s || "", st.p || 1, st.f || "", st.z || ""].join("~");
+function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || EVP_LEN, s: p[4] || "", p: +p[5] || 1, f: p[6] || "", z: p.slice(7).join("~") }; }
 const EVP_FROM = { d: "your device", r: "your roster time zone", t: "as typed", u: "no time zone saved" };
 function tzOff(tz, ms) { const f = tzOffsetMinutes(tz); if (f !== null) return f; const z = validZone(tz); return z ? zoneOffset(z, ms) : 0; }
 function wallToMs(tz, y, mo, d, h, mi) { const wall = Date.UTC(y, mo - 1, d, h, mi); let ms = wall - tzOff(tz, wall) * 60000; return wall - tzOff(tz, ms) * 60000; }
@@ -2150,7 +2150,7 @@ async function evpOpen(env, i, o) {
     if (o.timezone && !typed) return editReply(env, i, `"${o.timezone}" isn't a time zone. Pick one from the list, or leave it empty.`);
     if (!typed && !dev && o.__tz !== "roster" && env.BOT_KV && env.SHEETS_SECRET) return eventSchedule(env, i, o);   // asks for the time zone first
     const z = typed || dev || (me && me.z ? cleanTimezone(me.z) : "UTC");
-    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || 60)), s: "", p: 1, f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
+    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || EVP_LEN)), s: "", p: 1, f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
     const x = { title: cleanLine(o.title, 100), host: cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i)), sup: "", details: String(o.description || "").trim().slice(0, 1000) };
     if (o.supervisor) {
       const name = await rosterNameForUser(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || ""));
@@ -2169,7 +2169,7 @@ function evpAction(env, ctx, i) {
     const box = (id, label, style, max, value, required, ph) => ({ type: 18, label, component: Object.assign({ type: 4, custom_id: id, style, max_length: max, required, placeholder: ph }, value ? { value: String(value) } : {}) });
     return { type: R.MODAL, data: { custom_id: "evp:form:" + evpEnc(st), title: "Length, title & details", components: [
       box("title", "Title", 1, 100, x.title || (st.t !== null && EVENT_TYPES[st.t] !== "Other" ? EVENT_TYPES[st.t] : ""), true, "e.g. Patrol"),
-      box("length", "Length in minutes", 1, 3, st.m, true, "60"),
+      box("length", "Length in minutes", 1, 3, st.m, true, "30"),
       box("host", "Host (roster name)", 1, 60, x.host, false, "Leave empty for yourself"),
       box("details", "Details", 2, 1000, x.details, false, "What it's about (optional)")] } };
   }
@@ -3555,7 +3555,7 @@ const COMMUNITY_COMMANDS = [
       { type: 3, name: "title", description: "Optional: type it all in instead of using the form", required: false, max_length: 100 },
       { type: 3, name: "date", description: "Optional: DD/MM/YYYY, YYYY-MM-DD, today or tomorrow", required: false, max_length: 12 },
       { type: 3, name: "time", description: "Optional: start time, 24-hour HH:MM (e.g. 19:30)", required: false, max_length: 8 },
-      { type: 4, name: "length", description: "Optional: length in minutes (default 60)", required: false, min_value: 5, max_value: 720 },
+      { type: 4, name: "length", description: "Optional: length in minutes (default 30)", required: false, min_value: 5, max_value: 720 },
       { type: 3, name: "timezone", description: "The time zone you typed the time in (default: your device's, else your roster one)", required: false, autocomplete: true, max_length: 40 },
       { type: 3, name: "host", description: "Host (default: you)", required: false, autocomplete: true, max_length: 60 },
       { type: 3, name: "description", description: "What it's about", required: false, max_length: 1000 },
