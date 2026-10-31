@@ -3248,7 +3248,10 @@ async function cronApprovalReminders(env, now) {
       allowed_mentions: { parse: [], roles: roleId ? [roleId] : [] } });
     list.forEach(x => { st[x.id] = now; });
   };
-  await remind(old.filter(x => !isLoa(x)), CONFIG.APPROVAL_CHANNEL_ID, CONFIG.APPROVER_ROLE_ID, "here or on the roster's Approvals page");
+  // Award requests are Executive Management's: reminded in the award channel (pinging AWARD_PING_ROLE_ID), not DMO.
+  const isAward = x => /^award-/.test(String(x.id));
+  await remind(old.filter(x => !isLoa(x) && !isAward(x)), CONFIG.APPROVAL_CHANNEL_ID, CONFIG.APPROVER_ROLE_ID, "here or on the roster's Approvals page");
+  await remind(old.filter(isAward), requestChannel("award"), CONFIG.AWARD_PING_ROLE_ID, "on the website's Approvals page");
   await remind(old.filter(isLoa), requestChannel("loa"), CONFIG.CPM_ROLE_ID, "here or on the website's Approvals page");
   await kvPut(env, "state:approvals", st);
   return old.length ? "pinged about " + old.length : "";
