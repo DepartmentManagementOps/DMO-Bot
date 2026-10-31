@@ -1967,7 +1967,7 @@ async function eventSchedule(env, i, o) {
     const u0 = caller(i), dev = o.timezone ? "" : await deviceTz(env, u0.id);
     const useRoster = o.__tz === "roster";
     const tz = o.timezone || dev || (me && me.z) || "UTC+0";
-    const from = o.timezone ? "as typed" : dev ? "your device" : me && me.z ? "your roster time zone" : "no time zone saved";
+    const from = o.__from || (o.timezone ? "as typed" : dev ? "your device" : me && me.z ? "your roster time zone" : "no time zone saved");
     const tzLink = await deviceTzLink(env, i.__request, u0.id).catch(() => "");
     const tzRow = tzLink ? [{ type: 1, components: [{ type: 2, style: 5, label: dev ? "Change my time zone" : "Use my device's time zone", url: tzLink }] }] : [];
     // No time zone typed or saved yet: set it first (one click), so the time isn't read in the wrong zone.
@@ -2024,8 +2024,147 @@ function eventScheduleButton(env, ctx, i) {
     if (!o) return editOriginal(env, i, { content: "Those event details have expired. Run **/event schedule** again.", components: [], allowed_mentions: NO_PINGS });
     if (!roster && !(await deviceTz(env, u.id))) return followup(env, i, "Your time zone isn't saved yet. Press **Set my time zone**, confirm on the page, then press **Schedule event** again.");
     await env.BOT_KV.delete("evs:" + u.id).catch(() => {});
+    if (!o.date || !o.time || !o.title) return evpOpen(env, i, Object.assign({}, o, roster ? { __tz: "roster" } : {}));   // the booking form
     return eventSchedule(env, i, Object.assign({}, o, roster ? { __tz: "roster" } : {}));
   })().catch(err => followup(env, i, "Couldn't schedule it: " + err.message)));
+  return { type: R.DEFER_UPDATE };
+}
+
+// ---- /event schedule form: pick the type, the day and a free start time (no typing) ----
+// State lives in the components' custom_ids ("evp:<action>:<type>~<day>~<HHMM>~<minutes>~<from>~<zone>");
+// title, host and details in the form's own fields. Free times use the same rule as the website: an hour
+// between the end of one event and the start of the next.
+const EVP_GAP = 3600000, EVP_DAYS = 14, EVP_STEP = 30;
+const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || 60, st.f || "", st.z || ""].join("~");
+function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || 60, f: p[4] || "", z: p.slice(5).join("~") }; }
+const EVP_FROM = { d: "your device", r: "your roster time zone", t: "as typed", u: "no time zone saved" };
+function tzOff(tz, ms) { const f = tzOffsetMinutes(tz); if (f !== null) return f; const z = validZone(tz); return z ? zoneOffset(z, ms) : 0; }
+function wallToMs(tz, y, mo, d, h, mi) { const wall = Date.UTC(y, mo - 1, d, h, mi); let ms = wall - tzOff(tz, wall) * 60000; return wall - tzOff(tz, ms) * 60000; }
+function dayKeyAt(tz, ms) { const t = new Date(ms + tzOff(tz, ms) * 60000); return t.getUTCFullYear() + String(t.getUTCMonth() + 1).padStart(2, "0") + String(t.getUTCDate()).padStart(2, "0"); }
+const dayParts = k => ({ y: +k.slice(0, 4), mo: +k.slice(4, 6), d: +k.slice(6, 8) });
+function evpDays(tz) {
+  const out = [], today = dayKeyAt(tz, Date.now()), p = dayParts(today);
+  for (let k = 0; k < EVP_DAYS; k++) {
+    const dt = new Date(Date.UTC(p.y, p.mo - 1, p.d + k, 12));
+    const key = dt.toISOString().slice(0, 10).replace(/-/g, "");
+    const name = dt.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+    out.push({ key, label: k === 0 ? "Today · " + name : k === 1 ? "Tomorrow · " + name : name });
+  }
+  return out;
+}
+/** Free start times on that day (in their time zone) for an event of that length. */
+function evpFree(tz, dayKey, minutes, busy) {
+  const p = dayParts(dayKey), out = [], seen = {}, soon = Date.now() + 5 * 60000;
+  for (let m = 0; m < 1440; m += EVP_STEP) {
+    const h = Math.floor(m / 60), mi = m % 60, ms = wallToMs(tz, p.y, p.mo, p.d, h, mi);
+    if (ms < soon || seen[ms] || dayKeyAt(tz, ms) !== dayKey) continue;      // past, or a clock-change duplicate / gap
+    seen[ms] = 1;
+    if (busy.some(r => ms < r.e + EVP_GAP && ms + minutes * 60000 + EVP_GAP > r.s)) continue;
+    out.push({ hhmm: String(h).padStart(2, "0") + String(mi).padStart(2, "0"), label: String(h).padStart(2, "0") + ":" + String(mi).padStart(2, "0"), ms });
+  }
+  return out;
+}
+async function evpBusy(env) { const r = await bridge(env, { action: "eventsBusy" }).catch(() => null); return r && Array.isArray(r.events) ? r.events : []; }
+/** The form's fields that aren't in the state: title, host, details (read back from the form message). */
+function evpFields(message) {
+  const f = {}; (((message || {}).embeds || [])[0] || {}).fields && message.embeds[0].fields.forEach(x => { f[x.name] = x.value; });
+  const v = k => (f[k] && f[k] !== "—" ? f[k] : "");
+  return { title: v("Title"), host: v("Host"), details: v("Details") };
+}
+function evpView(st, x, busy, note) {
+  const days = evpDays(st.z), free = st.d ? evpFree(st.z, st.d, st.m, busy) : [];
+  if (st.h && !free.some(t => t.hhmm === st.h)) st.h = "";                 // no longer free (taken, or too long now)
+  const chosen = st.h ? free.find(t => t.hhmm === st.h) : null;
+  const enc = evpEnc(st), dayName = st.d ? ((days.find(d => d.key === st.d) || {}).label || st.d) : "";
+  const fields = [
+    { name: "Type", value: st.t !== null ? EVENT_TYPES[st.t] : "—", inline: true },
+    { name: "Day", value: dayName || "—", inline: true },
+    { name: "Start", value: chosen ? `${chosen.label} (<t:${ts(chosen.ms)}:R>)` : "—", inline: true },
+    { name: "Length", value: fmtMins(st.m), inline: true },
+    { name: "Host", value: x.host || "—", inline: true },
+    { name: "Title", value: x.title || "—", inline: true },
+    { name: "Details", value: x.details ? x.details.slice(0, 1000) : "—", inline: false }];
+  const timeSelect = (id, list, empty) => ({ type: 1, components: [list.length
+    ? { type: 3, custom_id: "evp:" + id + ":" + enc, placeholder: id === "am" ? "Start time before 12:00" : "Start time from 12:00",
+        options: list.slice(0, 25).map(t => ({ label: t.label, value: t.hhmm, default: t.hhmm === st.h })) }
+    : { type: 3, custom_id: "evp:" + id + ":" + enc, placeholder: empty, disabled: true, options: [{ label: "none", value: "none" }] }] });
+  const am = free.filter(t => t.hhmm < "1200"), pm = free.filter(t => t.hhmm >= "1200");
+  const ready = st.t !== null && chosen && x.title;
+  if (!note && st.t !== null && !x.title) note = "Press **Length, title & details** to name this event.";
+  return { content: note || "", allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, title: "Book an event",
+    description: `Pick the type, the day and a free start time. Times are in **${zoneLabel(st.z, chosen ? chosen.ms : Date.now())}** (${EVP_FROM[st.f] || "your time zone"}).` +
+      "\n-# Only times with at least an hour's gap from other events are shown.", fields, footer: { text: "Only you can see this" } }],
+    components: [
+      { type: 1, components: [{ type: 3, custom_id: "evp:type:" + enc, placeholder: "Event type", options: EVENT_TYPES.map((t, k) => ({ label: t, value: String(k), default: st.t === k })) }] },
+      { type: 1, components: [{ type: 3, custom_id: "evp:day:" + enc, placeholder: "Day", options: days.map(d => ({ label: d.label, value: d.key, default: d.key === st.d })) }] },
+      timeSelect("am", am, st.d ? "No free times before 12:00" : "Pick a day first"),
+      timeSelect("pm", pm, st.d ? "No free times from 12:00" : "Pick a day first"),
+      { type: 1, components: [
+        { type: 2, style: 3, label: "Book event", custom_id: "evp:book:" + enc, disabled: !ready },
+        { type: 2, style: 2, label: "Length, title & details", custom_id: "evp:more:" + enc },
+        { type: 2, style: 2, label: "Cancel", custom_id: "evp:cancel:" + enc }] }] };
+}
+/** Opens the form (after the time zone check, which eventSchedule's prompt handles). */
+async function evpOpen(env, i, o) {
+  try {
+    const gate = await canManage(env, i);
+    if (!gate.ok) return editReply(env, i, gate.error);
+    const roster = await loadRoster(env).catch(() => null);
+    const me = gate.me || (roster ? findPerson(roster, i) : null);
+    const u = caller(i), dev = o.timezone || o.__tz === "roster" ? "" : await deviceTz(env, u.id);
+    const typed = o.timezone ? (validZone(o.timezone) || (tzOffsetMinutes(o.timezone) !== null ? cleanTimezone(o.timezone) : "")) : "";
+    if (o.timezone && !typed) return editReply(env, i, `"${o.timezone}" isn't a time zone. Pick one from the list, or leave it empty.`);
+    if (!typed && !dev && o.__tz !== "roster" && env.BOT_KV && env.SHEETS_SECRET) return eventSchedule(env, i, o);   // asks for the time zone first
+    const z = typed || dev || (me && me.z ? cleanTimezone(me.z) : "UTC");
+    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || 60)), f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
+    const x = { title: cleanLine(o.title, 100), host: cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i)), details: String(o.description || "").trim().slice(0, 1000) };
+    return editOriginal(env, i, evpView(st, x, await evpBusy(env)));
+  } catch (err) {
+    await editReply(env, i, "Couldn't open the booking form: " + err.message).catch(() => {});
+  }
+}
+function evpAction(env, ctx, i) {
+  const [, act, ...rest] = i.data.custom_id.split(":");
+  const st = evpDec(rest.join(":")), x = evpFields(i.message);
+  if (act === "cancel") return { type: R.UPDATE, data: { content: "Nothing was booked.", embeds: [], components: [] } };
+  if (act === "more") {
+    const box = (id, label, style, max, value, required, ph) => ({ type: 18, label, component: Object.assign({ type: 4, custom_id: id, style, max_length: max, required, placeholder: ph }, value ? { value: String(value) } : {}) });
+    return { type: R.MODAL, data: { custom_id: "evp:form:" + evpEnc(st), title: "Length, title & details", components: [
+      box("title", "Title", 1, 100, x.title || (st.t !== null ? EVENT_TYPES[st.t] : ""), true, "e.g. Patrol"),
+      box("length", "Length in minutes", 1, 3, st.m, true, "60"),
+      box("host", "Host (roster name)", 1, 60, x.host, false, "Leave empty for yourself"),
+      box("details", "Details", 2, 1000, x.details, false, "What it's about (optional)")] } };
+  }
+  ctx.waitUntil((async () => {
+    const v = (i.data.values || [])[0];
+    let note = "";
+    if (act === "type") {
+      const old = st.t !== null ? EVENT_TYPES[st.t] : "";
+      st.t = Math.max(0, Math.min(EVENT_TYPES.length - 1, +v || 0));
+      if (!x.title || x.title === old) x.title = EVENT_TYPES[st.t] === "Other" ? "" : EVENT_TYPES[st.t];
+      if (!x.title) note = "Press **Length, title & details** to name this event.";
+    }
+    if (act === "day") { st.d = /^\d{8}$/.test(v || "") ? v : ""; }
+    if (act === "am" || act === "pm") st.h = /^\d{4}$/.test(v || "") ? v : "";
+    if (act === "form") {
+      const f = modalValues(i);
+      const len = Math.round(Number(f.length));
+      if (!(len >= 5 && len <= 720)) note = "The length must be between 5 and 720 minutes.";
+      else st.m = len;
+      x.title = cleanLine(f.title, 100) || x.title;
+      x.host = cleanLine(f.host, 60) || x.host;
+      x.details = String(f.details || "").trim().slice(0, 1000);
+    }
+    const busy = await evpBusy(env);
+    if (act === "book") {
+      const view = evpView(Object.assign({}, st), x, busy);
+      const p = dayParts(st.d || "00000000");
+      if (!st.h || view.components[4].components[0].disabled) return editOriginal(env, i, evpView(st, x, busy, "That start time has just been taken. Pick another."));
+      return eventSchedule(env, i, { title: x.title, date: `${p.y}-${String(p.mo).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`,
+        time: st.h.slice(0, 2) + ":" + st.h.slice(2), length: st.m, timezone: st.z, host: x.host, description: x.details, __from: EVP_FROM[st.f] });
+    }
+    return editOriginal(env, i, evpView(st, x, busy, note));
+  })().catch(err => followup(env, i, "Couldn't do that: " + err.message)));
   return { type: R.DEFER_UPDATE };
 }
 
@@ -3334,7 +3473,7 @@ async function handleCommunity(i, env, ctx) {
   if (i.type === T.COMMAND) {
     const needsRoster = ["event", "profile", "leaderboard", "mystats", "link", "roster"].indexOf(name) !== -1;
     if (needsRoster && !linked(env) && !(name === "event" && (f.sub === "list" || f.sub === "log"))) return reply("The roster isn't linked yet.");
-    if (name === "event" && f.sub === "schedule") { ctx.waitUntil(eventSchedule(env, i, o)); return deferred(); }
+    if (name === "event" && f.sub === "schedule") { ctx.waitUntil(o.title && o.date && o.time ? eventSchedule(env, i, o) : evpOpen(env, i, o)); return deferred(); }
     if (name === "event" && f.sub === "cancel") { ctx.waitUntil(eventCancel(env, i, o)); return deferred(); }
     if (name === "event" && f.sub === "list") { ctx.waitUntil(eventList(env, i)); return deferred(o); }
     if (name === "event" && f.sub === "log") return eventLogStart(env, ctx, o, i);
@@ -3351,6 +3490,7 @@ async function handleCommunity(i, env, ctx) {
   if (i.type === T.COMPONENT && /^rq:(yes|no|claim|release):/.test(i.data.custom_id)) return requestDecisionAction(env, ctx, i);
   if (i.type === T.COMPONENT && /^mk:/.test(i.data.custom_id)) { ctx.waitUntil(marketComponent(env, i)); return { type: R.DEFER_UPDATE }; }
   if (i.type === T.COMPONENT && /^evs:(go|roster)$/.test(i.data.custom_id)) return eventScheduleButton(env, ctx, i);
+  if ((i.type === T.COMPONENT || i.type === T.MODAL_SUBMIT) && /^evp:/.test(i.data.custom_id)) return evpAction(env, ctx, i);
   if (i.type === T.MODAL_SUBMIT && /^rq:(noform:|loaform$)/.test(i.data.custom_id)) return requestDecisionSubmit(env, ctx, i);
   return null;
 }
@@ -3359,11 +3499,11 @@ async function handleCommunity(i, env, ctx) {
 const COMMUNITY_COMMANDS = [
   { name: "market", description: "See the Market and request a purchase with your points (Management+)", dm_permission: false },
   { name: "event", description: "Events: log one for approval, or schedule, cancel and list HQ events", dm_permission: false, options: [
-    { type: 1, name: "schedule", description: "Schedule an event (Management+)", options: [
-      { type: 3, name: "title", description: "Event name", required: true, max_length: 100 },
-      { type: 3, name: "date", description: "DD/MM/YYYY, YYYY-MM-DD, today or tomorrow", required: true, max_length: 12 },
-      { type: 3, name: "time", description: "Start time, 24-hour HH:MM (e.g. 19:30)", required: true, max_length: 8 },
-      { type: 4, name: "length", description: "Length in minutes", required: true, min_value: 5, max_value: 720 },
+    { type: 1, name: "schedule", description: "Book an event: pick the type, day and a free start time (Management+)", options: [
+      { type: 3, name: "title", description: "Optional: type it all in instead of using the form", required: false, max_length: 100 },
+      { type: 3, name: "date", description: "Optional: DD/MM/YYYY, YYYY-MM-DD, today or tomorrow", required: false, max_length: 12 },
+      { type: 3, name: "time", description: "Optional: start time, 24-hour HH:MM (e.g. 19:30)", required: false, max_length: 8 },
+      { type: 4, name: "length", description: "Optional: length in minutes (default 60)", required: false, min_value: 5, max_value: 720 },
       { type: 3, name: "timezone", description: "The time zone you typed the time in (default: your device's, else your roster one)", required: false, autocomplete: true, max_length: 40 },
       { type: 3, name: "host", description: "Host (default: you)", required: false, autocomplete: true, max_length: 60 },
       { type: 3, name: "description", description: "What it's about", required: false, max_length: 1000 }] },
