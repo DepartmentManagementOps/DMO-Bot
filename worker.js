@@ -2006,9 +2006,9 @@ async function eventSchedule(env, i, o) {
     // Supervisor (optional): someone on the roster, picked as a Discord member.
     let supervisor = "";
     if (o.supervisor) {
-      const sv = await rosterNameForUser(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || o.__supName || ""));
-      if (!sv) return editOriginal(env, i, { content: "**Supervisor:** they aren't on the roster (or linked with /link). Pick someone on the roster, or leave it empty.", embeds: [], components: tzRow, allowed_mentions: NO_PINGS });
-      supervisor = sv;
+      const sv = await supervisorFor(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || o.__supName || ""));
+      if (sv.error) return editOriginal(env, i, { content: "**Supervisor:** " + sv.error + " Pick someone else, or leave it empty.", embeds: [], components: tzRow, allowed_mentions: NO_PINGS });
+      supervisor = sv.name;
     }
     // The supervisor is kept as the description's first line ("Supervisor: name"), so the website shows it too.
     const e = { start: when.ms, minutes: minutes, title: cleanLine(o.title, 100), host: host, hostEmp: hp ? (hp.e || "") : "",
@@ -2084,13 +2084,24 @@ function evpFree(tz, dayKey, minutes, busy) {
 }
 async function evpBusy(env) { const r = await bridge(env, { action: "eventsBusy" }).catch(() => null); return r && Array.isArray(r.events) ? r.events : []; }
 /** A Discord member's roster name (through their /link, else their username), or "". */
-async function rosterNameForUser(env, roster, userId, username) {
+// Supervisors: System Inspector (rank 07) and above on the roster, or Department Leadership.
+const SUPERVISOR_MIN_RANK = 7;
+/** → { name } for someone who may supervise, or { error } saying why not. */
+async function supervisorFor(env, roster, userId, username) {
+  const p = await rosterPersonForUser(env, roster, userId, username);
+  if (!p) return { error: `<@${userId}> isn't on the roster (or linked with /link), so they can't supervise.` };
+  if (!(p.s === "Leadership" || rankNumber(p.k) >= SUPERVISOR_MIN_RANK))
+    return { error: `**${p.r || p.d}** can't supervise: supervisors must be System Inspector or above. Their rank is ${p.k || "not set"}.` };
+  return { name: p.r || p.d };
+}
+async function rosterNameForUser(env, roster, userId, username) { const p = await rosterPersonForUser(env, roster, userId, username); return p ? (p.r || p.d) : ""; }
+async function rosterPersonForUser(env, roster, userId, username) {
   const l = await bridge(env, { action: "links", discordId: userId }).catch(() => null);
   const emp = l && l.ok && (l.links || [])[0] && l.links[0].emp;
   const find = r => r ? ((emp && r.list.find(x => normEmp(x.e) === normEmp(emp))) || (username && r.by[String(username).toLowerCase()])) : null;
   let p = find(roster);
   if (!p) p = find(await loadRoster(env, 0).catch(() => null));   // just added to the roster: fetch it again
-  return p ? (p.r || p.d) : "";
+  return p || null;
 }
 /** Title, host, supervisor name and details, read back from the form message. */
 function evpFields(message) {
@@ -2132,7 +2143,7 @@ function evpView(st, x, busy, note) {
       { name: "Starts", value: chosen ? `<t:${ts(chosen.ms)}:F>\n<t:${ts(chosen.ms)}:R>` : "—", inline: true },
       { name: "Length", value: fmtMins(st.m), inline: true }].concat(keep) });
     rows = [
-      { type: 1, components: [{ type: 5, custom_id: "evp:sup:" + enc(), placeholder: x.sup ? "Supervisor: " + x.sup : "Supervisor (only if the event needs one)", min_values: 0, max_values: 1 }] },
+      { type: 1, components: [{ type: 5, custom_id: "evp:sup:" + enc(), placeholder: x.sup ? "Supervisor: " + x.sup : "Supervisor, System Inspector+ (only if needed)", min_values: 0, max_values: 1 }] },
       { type: 1, components: [btn("Book event", "book", 3, !chosen || !x.title), btn("Change length, title or details", "more", 2), btn("Back", "to2", 2), btn("Cancel", "cancel", 2)] }];
   }
   if (!note && st.t !== null && !x.title && st.p === 3) note = "This event needs a title: press **Change length, title or details**.";
@@ -2152,11 +2163,12 @@ async function evpOpen(env, i, o) {
     const z = typed || dev || (me && me.z ? cleanTimezone(me.z) : "UTC");
     const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || EVP_LEN)), s: "", p: 1, f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
     const x = { title: cleanLine(o.title, 100), host: cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i)), sup: "", details: String(o.description || "").trim().slice(0, 1000) };
+    let supNote = "";
     if (o.supervisor) {
-      const name = await rosterNameForUser(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || ""));
-      if (name) { st.s = String(o.supervisor); x.sup = name; }
+      const sv = await supervisorFor(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || ""));
+      if (sv.name) { st.s = String(o.supervisor); x.sup = sv.name; } else supNote = sv.error;
     }
-    return editOriginal(env, i, evpView(st, x, await evpBusy(env)));
+    return editOriginal(env, i, evpView(st, x, await evpBusy(env), supNote));
   } catch (err) {
     await editReply(env, i, "Couldn't open the booking form: " + err.message).catch(() => {});
   }
@@ -2190,8 +2202,8 @@ function evpAction(env, ctx, i) {
       if (!v) { st.s = ""; x.sup = ""; }
       else {
         const roster = await loadRoster(env).catch(() => null);
-        const name = await rosterNameForUser(env, roster, v, String(((((i.data || {}).resolved || {}).users || {})[v] || {}).username || ""));
-        if (name) { st.s = v; x.sup = name; } else note = `<@${v}> isn't on the roster (or linked with /link), so they can't supervise.`;
+        const sv = await supervisorFor(env, roster, v, String(((((i.data || {}).resolved || {}).users || {})[v] || {}).username || ""));
+        if (sv.name) { st.s = v; x.sup = sv.name; } else note = sv.error;
       }
     }
     if (act === "form") {
@@ -3559,7 +3571,7 @@ const COMMUNITY_COMMANDS = [
       { type: 3, name: "timezone", description: "The time zone you typed the time in (default: your device's, else your roster one)", required: false, autocomplete: true, max_length: 40 },
       { type: 3, name: "host", description: "Host (default: you)", required: false, autocomplete: true, max_length: 60 },
       { type: 3, name: "description", description: "What it's about", required: false, max_length: 1000 },
-      { type: 6, name: "supervisor", description: "Supervisor, if the event needs one", required: false }] },
+      { type: 6, name: "supervisor", description: "Supervisor, if the event needs one (System Inspector or above)", required: false }] },
     { type: 1, name: "cancel", description: "Cancel an event you booked", options: [
       { type: 3, name: "event", description: "Start typing the event's name", required: true, autocomplete: true }] },
     { type: 1, name: "log", description: "Log an event for approval", options: [
