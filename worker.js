@@ -66,7 +66,11 @@ const CONFIG = {
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
   SELFTEST_CHANNEL_ID: "1565825275533730042",   // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
   MARKET_LOG_CHANNEL_ID: "1525333050471481454",
-  EVENT_BOOKINGS_CHANNEL_ID: "1488298218050814042",   // every /event schedule booking is posted here (pings the host and supervisor)
+  EVENT_BOOKINGS_CHANNEL_ID: "1488298218050814042",
+  // Automatic linking: server members whose Discord username matches an unlinked roster entry are linked and
+  // given their roles (needs Server Members Intent). A note of each run's links goes here ("" = the health report channel).
+  AUTO_LINK: true,
+  AUTOLINK_LOG_CHANNEL_ID: "",   // every /event schedule booking is posted here (pings the host and supervisor)
   MARKET_TICKET_CHANNEL_ID: "1488308159935418479",   // #support-line: Market items that need approval ask buyers to open a Misc ticket here    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
   // Market perks that are just a Discord role: bought instantly (points taken, role given straight away, and taken
   // off again when the perk runs out). Matched to the shop item and the server role by name ("Perms" = "Permission").
@@ -121,6 +125,12 @@ export default {
       if (!env.REGISTER_KEY || url.searchParams.get("key") !== env.REGISTER_KEY) return new Response("Wrong key", { status: 403 });
       const log = await runCron(env, Date.now());
       return new Response(log.length ? log.join("\n") : "Ran. Nothing to do.");
+    }
+
+    // Automatic linking, now: /autolink?key=REGISTER_KEY
+    if (request.method === "GET" && url.pathname === "/autolink") {
+      if (!env.REGISTER_KEY || url.searchParams.get("key") !== env.REGISTER_KEY) return new Response("Wrong key", { status: 403 });
+      return new Response(await cronAutoLink(env, Date.now(), true) || "Nothing to link.", { headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }
 
     // The self-test, now: /selftest?key=REGISTER_KEY (add &post=1 to post the report as well)
@@ -2960,6 +2970,7 @@ async function runCron(env, now) {
   if (CONFIG.ROLE_AUTO_SYNC !== false) await step("roles", () => cronRoleChanges(env, now));
   if (CONFIG.ROLE_AUTO_SYNC !== false) await step("request roles", () => cronRequestRoles(env, now));
   await step("market perks", () => cronPerks(env, now));
+  await step("auto-link", () => cronAutoLink(env, now));
   await step("self-test", () => cronSelfTest(env, now));
   return log;
 }
@@ -3032,6 +3043,65 @@ async function cronRequestRoles(env, now) {
   }
   await kvPut(env, "state:reqroles", st, 4 * 86400);
   return out.join(", ");
+}
+
+// ---- Automatic linking ----
+// Every 15 minutes: server members whose Discord username is exactly the one on an unlinked roster entry are
+// linked to it and given their roles, so nobody has to run /link. Safe by design: only people with no link yet,
+// never changing an existing link, and a name shared by two unlinked entries is skipped. Up to 25 per run.
+async function guildMembers(env) {
+  const out = [];
+  let after = "0";
+  for (let page = 0; page < 20; page++) {
+    const list = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/members?limit=1000&after=${after}`);
+    out.push(...list);
+    if (list.length < 1000) break;
+    after = list[list.length - 1].user.id;
+  }
+  return out;
+}
+const userKey = n => String(n || "").trim().replace(/^@/, "").replace(/#0+$/, "").toLowerCase();
+async function cronAutoLink(env, now, force) {
+  if (CONFIG.AUTO_LINK === false || !CONFIG.GUILD_ID || !linked(env) || !env.BOT_KV) return "";
+  const st = await kvGet(env, "state:autolink", {}) || {};
+  if (!force && st.at && now - st.at < 15 * 60000) return "";
+  st.at = now;
+  let members;
+  try { members = await guildMembers(env); }
+  catch (e) {
+    st.error = /403|50001|Missing Access/.test(e.message) ? "intent" : e.message.slice(0, 120);
+    await kvPut(env, "state:autolink", st);
+    return st.error === "intent" ? "off: turn on Server Members Intent (Developer Portal ▸ Bot)" : "couldn't read the member list: " + st.error;
+  }
+  st.error = "";
+  const res = await bridge(env, { action: "unlinked" });
+  if (!res.ok) throw new Error(res.error);
+  const taken = new Set(res.linkedIds || []);
+  const byName = {};
+  members.forEach(m => { if (m.user && !m.user.bot) byName[userKey(m.user.username)] = m.user.id; });
+  const count = {};
+  (res.people || []).forEach(p => { const k = userKey(p.discord); count[k] = (count[k] || 0) + 1; });
+  const done = [];
+  for (const p of res.people || []) {
+    if (done.length >= 25) break;
+    const k = userKey(p.discord), id = byName[k];
+    if (!id || count[k] > 1 || taken.has(id)) continue;
+    const l = await bridge(env, { action: "linkDiscord", emp: p.emp, discordId: id, by: "self", targetName: p.discord }).catch(e => ({ ok: false, error: e.message }));
+    if (!l.ok) continue;
+    taken.add(id);
+    ROSTER = null;
+    const r = await syncRolesFor(env, id, p.emp, "link").catch(e => ({ error: e.message }));
+    await noteRoles(env, "auto-link #" + p.emp, id, r);
+    done.push({ id, emp: p.emp, name: p.roblox || p.discord, roles: r && !r.error ? "roles given" : "roles not given: " + ((r && r.error) || "unknown") });
+  }
+  st.linked = (st.linked || 0) + done.length;
+  await kvPut(env, "state:autolink", st);
+  if (!done.length) return "";
+  const channel = CONFIG.AUTOLINK_LOG_CHANNEL_ID || CONFIG.SELFTEST_CHANNEL_ID;
+  if (channel) await discord(env, "POST", `/channels/${channel}/messages`, { allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info,
+    title: "Linked automatically", description: done.map(d => `• <@${d.id}> → **${d.name}** (#${d.emp}) · ${d.roles}`).join("\n").slice(0, 4000),
+    footer: { text: "Matched by Discord username to unlinked roster entries. Wrong match? Correct the roster's Discord name." }, timestamp: new Date(now).toISOString() }] }).catch(() => {});
+  return "linked " + done.length + ": " + done.map(d => "#" + d.emp).join(", ");
 }
 
 async function cronEvents(env, now) {
@@ -4329,6 +4399,12 @@ async function selfTest(env) {
     }
     add("Instant Market perks", bad.length ? "warn" : "ok", bad.length ? bad.join("; ") : CONFIG.MARKET_AUTO_ROLES.length + " perks matched to roles");
   });
+  if (CONFIG.AUTO_LINK !== false && CONFIG.GUILD_ID) {
+    const al = await kvGet(env, "state:autolink", null);
+    if (al && al.error) add("Automatic linking", "warn", al.error === "intent" ? "the bot can't read the member list" : "couldn't read the member list: " + al.error,
+      al.error === "intent" ? "Discord Developer Portal ▸ your app ▸ Bot ▸ turn on Server Members Intent." : "");
+    else add("Automatic linking", "ok", al ? (al.linked || 0) + " linked automatically so far" : "waiting for its first run");
+  }
   await tryStep("Slash commands", async () => {
     const want = ["lookup"].concat(Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => REQUESTS[k].command), COMMUNITY_COMMANDS.map(c => c.name));
     const have = (await discord(env, "GET", `/applications/${CONFIG.APP_ID}/commands`)).map(c => c.name);
@@ -4363,6 +4439,7 @@ const SELFTEST_GUIDE = {
   "Discord channels":        ["Discord", "Logs, requests or reports can't be posted there.", "Give the bot View Channel and Send Messages in those channels, or correct the channel IDs in CONFIG."],
   "Discord roles":           ["Discord", "Those roles can't be given or removed.", "Server Settings ▸ Roles: drag the bot's role above them."],
   "Instant Market perks":    ["Discord", "Those perks can't be bought instantly; purchases fail until fixed.", "Make the shop item and the server role names match the bot's list (MARKET_AUTO_ROLES), and keep the roles below the bot's role."],
+  "Automatic linking":       ["Discord", "New and existing members aren't linked automatically; they have to run /link.", "Discord Developer Portal ▸ your app ▸ Bot ▸ turn on Server Members Intent."],
   "Slash commands":          ["Discord", "Members can't use the missing commands.", "Open /register?key=REGISTER_KEY on the bot once."],
 };
 const SELFTEST_GROUPS = ["Connections", "Website", "Approvals and roles", "Discord"];
