@@ -900,7 +900,13 @@ async function syncRequest(env, b) {
     }
   }
   const rolesToo = b.status === "Done" && (type === "roster" || type === "award") && CONFIG.GUILD_ID;
-  if (row && !rolesToo) await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
+  // Accepted Role & Roster requests are removed from the channel once fully done (roles given): only ones
+  // that still need someone's attention stay. Others keep their message.
+  const removeDone = () => discord(env, "DELETE", path).catch(err => console.warn("Couldn't delete " + b.id + ": " + err.message));
+  if (row && !rolesToo) {
+    if (type === "roster" && b.status === "Done") await removeDone();
+    else await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
+  }
   // Approved roster / award request: give that person their roles straight away.
   if (rolesToo) {
     // Straight to the person who sent it, through their link (the roster links a new member just before
@@ -926,7 +932,8 @@ async function syncRequest(env, b) {
     row = r && !r.error
       ? statusRow(`Approved by ${who} · roles given` + (failed ? ` (${failed} blocked: the bot's role is too low)` : ""), failed ? "⚠️" : "✅")
       : statusRow(`Approved by ${who} · roles not given: ${String((r && r.error) || "unknown").slice(0, 40)}`, "⚠️");
-    await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
+    if (type === "roster" && r && !r.error && !failed) await removeDone();      // all done: nothing left to see
+    else await discord(env, "PATCH", path, { components: [row], allowed_mentions: NO_PINGS }).catch(() => {});
   }
   if (dmText && b.submittedById) await dm(env, b.submittedById, { embeds: [{ author: { name: CONFIG.NAME }, color: colour, description: dmText, timestamp: new Date().toISOString() }] });
 }
