@@ -2067,7 +2067,7 @@ async function discordIdForEmp(env, emp) {
   const l = await bridge(env, { action: "links", emp }).catch(() => null);
   return (l && l.ok && (l.links || [])[0] && l.links[0].discordId) || "";
 }
-/** Posts a booking in CONFIG.EVENT_BOOKINGS_CHANNEL_ID (pinging the host and supervisor); kept so a cancel can mark it. */
+/** Posts a booking in CONFIG.EVENT_BOOKINGS_CHANNEL_ID (pinging the host and supervisor); kept so a cancel can delete it. */
 async function postBooking(env, e, b) {
   const who = (id, name) => id ? `<@${id}>` : (name || "None");
   const s = ts(e.start);
@@ -2318,12 +2318,12 @@ async function eventCancel(env, i, o) {
       if (st) { st.cancelled = st.cancelled || {}; st.cancelled[k] = Date.now(); await kvPut(env, "state:events", st); }
       if (msg) note = ` Posted in <#${CONFIG.EVENTS_CHANNEL_ID}>.`;
     } catch (err) { /* the HQ change is what matters */ }
-    // The booking post: marked as cancelled.
+    // The booking post: deleted.
     const postId = CONFIG.EVENT_BOOKINGS_CHANNEL_ID ? await kvGet(env, "bookpost:" + evKey(e), null) : null;
     if (postId) {
-      const path = `/channels/${CONFIG.EVENT_BOOKINGS_CHANNEL_ID}/messages/${postId}`;
-      const m = await discord(env, "GET", path).catch(() => null);
-      if (m) await discord(env, "PATCH", path, { content: ("**Cancelled** by " + callerName(i) + "\n" + String(m.content || "").split("\n").map(l => "~~" + l + "~~").join("\n")).slice(0, 2000), allowed_mentions: NO_PINGS }).catch(() => {});
+      const gone = await discord(env, "DELETE", `/channels/${CONFIG.EVENT_BOOKINGS_CHANNEL_ID}/messages/${postId}`).then(() => true, err => /404/.test(err.message));
+      if (gone && env.BOT_KV) await env.BOT_KV.delete("bookpost:" + evKey(e)).catch(() => {});
+      if (gone) note += ` The booking post in <#${CONFIG.EVENT_BOOKINGS_CHANNEL_ID}> was removed.`;
     }
     await editReply(env, i, `**${e.title}** (<t:${ts(start)}:F>) has been cancelled and removed from the HQ.` + note);
   } catch (err) {
