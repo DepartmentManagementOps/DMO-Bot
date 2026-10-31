@@ -1973,7 +1973,7 @@ async function eventSchedule(env, i, o) {
     const u = caller(i);
     const res = await bridge(env, { action: "scheduleEvent", id: "ev-" + i.id, event: e, byId: u.id, byName: u.username || "" })
       .catch(err => ({ ok: false, error: err.message }));
-    if (!res.ok) return editReply(env, i, "Couldn't add it to the HQ events: " + res.error);
+    if (!res.ok) return editReply(env, i, res.gap ? res.error : "Couldn't add it to the HQ events: " + res.error);
 
     // Announce it now (the 5-minute check won't announce it again).
     let note = "";
