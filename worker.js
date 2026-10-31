@@ -3912,8 +3912,24 @@ async function registerCommands(env) {
     ].concat(Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => Object.assign({ name: REQUESTS[k].command, description: REQUESTS[k].description, dm_permission: false },
       REQUESTS[k].options ? { options: REQUESTS[k].options } : {})), COMMUNITY_COMMANDS))
   });
-  return new Response(res.ok ? "Done. /lookup, " + Object.keys(REQUESTS).filter(k => REQUESTS[k].command).map(k => "/" + REQUESTS[k].command).join(", ") +
-    ", " + COMMUNITY_COMMANDS.map(c => "/" + c.name).join(", ") + " are registered. They can take a minute to appear in Discord." : "Failed: " + (await res.text()), { status: res.ok ? 200 : 500 });
+  if (!res.ok) return new Response("Failed: Discord said " + res.status + ": " + (await res.text()), { status: 500 });
+  const out = await res.json().catch(() => []);
+  // The bot's commands are global. Copies registered for one server only (by older versions) show up next to
+  // them in that server and run the old definition, so they're removed.
+  const lines = ["Registered " + out.length + " commands for every server: " + out.map(c => "/" + c.name).join(", ") + "."];
+  const ev = out.find(c => c.name === "event"), sch = ev && (ev.options || []).find(o => o.name === "schedule");
+  if (sch) lines.push("/event schedule needs " + ((sch.options || []).filter(o => o.required).map(o => o.name).join(", ") || "nothing") + " (empty = opens the booking form).");
+  for (const gid of [CONFIG.GUILD_ID].filter(Boolean)) {
+    const g = await discord(env, "GET", `/applications/${CONFIG.APP_ID}/guilds/${gid}/commands`).catch(e => ({ error: e.message }));
+    if (Array.isArray(g) && g.length) {
+      const del = await fetch(`${API}/applications/${CONFIG.APP_ID}/guilds/${gid}/commands`, { method: "PUT", headers: { "Authorization": "Bot " + env.BOT_TOKEN, "Content-Type": "application/json" }, body: "[]" });
+      lines.push(del.ok ? "Removed " + g.length + " old server-only copies (" + g.map(c => "/" + c.name).join(", ") + ") from server " + gid + "." : "Couldn't remove the old server-only copies in server " + gid + " (" + del.status + ").");
+    } else if (g && g.error) lines.push("Couldn't check server " + gid + " for old copies: " + g.error);
+    else lines.push("No old server-only copies in server " + gid + ".");
+  }
+  lines.push("", "Restart Discord (or press Ctrl+R) to see the changes. When you type /event, the commands should show this bot's name: " +
+    "if another bot's /event appears too, that one is a different bot.");
+  return new Response(lines.join("\n"), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
 
 // ---------------------------------------------------------------------
