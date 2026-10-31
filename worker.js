@@ -44,7 +44,9 @@ const CONFIG = {
   // Where requests are posted. Leave a type "" to use REQUEST_CHANNEL_ID,
   // and leave that "" to use the approval-logs channel until you have one.
   REQUEST_CHANNEL_ID: "",
-  REQUEST_CHANNELS: { roster: "1492261816321966291", award: "1511822488936644648", loa: "1488310011443679413" },
+  REQUEST_CHANNELS: { roster: "1496166593779073115", award: "1511822488936644648", loa: "1488310011443679413" },   // roster = approval logs
+  // Where requests used to go: messages already posted there are still updated (and deleted) there.
+  PREVIOUS_REQUEST_CHANNELS: { roster: ["1492261816321966291"] },
   // The @Department of Management Operations role (the "Ping:" line on award requests).
   DMO_ROLE_ID: "1525337433892458618",
   AWARD_PING_ROLE_ID: "1530688776547074198",   // pinged on new award requests (the "Ping:" line); "" = DMO_ROLE_ID
@@ -178,7 +180,7 @@ export default {
       if (!env.SHEETS_SECRET || body.secret !== env.SHEETS_SECRET) return new Response("Not allowed", { status: 403 });
       try {
         const rk = (String(body.id || "").match(/^(award|roster|loa)-/) || [])[1];
-        const message = await discord(env, "GET", `/channels/${rk ? requestChannel(rk) : CONFIG.APPROVAL_CHANNEL_ID}/messages/${String(body.id).replace(/\D/g, "")}`);
+        const message = await discord(env, "GET", rk ? await requestMessagePath(env, rk, body.id) : `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages/${String(body.id).replace(/\D/g, "")}`);
         const src = proofSource(message);
         if (!src) return json({ ok: false, error: "the #approval-logs message has no screenshot" });
         const file = await download(src.url, src.name);
@@ -195,7 +197,7 @@ export default {
       if (!env.SHEETS_SECRET || !(await hmacOk(env.SHEETS_SECRET, id, sig))) return new Response("Not allowed", { status: 403 });
       try {
         const rk = (id.match(/^(award|roster|loa)-/) || [])[1];
-        const message = await discord(env, "GET", `/channels/${rk ? requestChannel(rk) : CONFIG.APPROVAL_CHANNEL_ID}/messages/${id.replace(/\D/g, "")}`);
+        const message = await discord(env, "GET", rk ? await requestMessagePath(env, rk, id) : `/channels/${CONFIG.APPROVAL_CHANNEL_ID}/messages/${id.replace(/\D/g, "")}`);
         const src = proofSource(message);
         if (!src) return new Response("No screenshot", { status: 404 });
         const w = Math.min(Number(url.searchParams.get("w")) || 0, 2000);
@@ -854,6 +856,16 @@ async function sendRequest(env, i, type, st, att) {
   }
 }
 
+/** Where a request's message is: its channel now, else one it used to be posted in (moved channels). */
+async function requestMessagePath(env, type, id) {
+  const msgId = String(id).replace(/\D/g, "");
+  const now = `/channels/${requestChannel(type)}/messages/${msgId}`;
+  const before = ((CONFIG.PREVIOUS_REQUEST_CHANNELS || {})[type] || []).filter(c => c !== requestChannel(type));
+  if (!before.length) return now;
+  if (await discord(env, "GET", now).then(() => true, () => false)) return now;
+  for (const c of before) { const p = `/channels/${c}/messages/${msgId}`; if (await discord(env, "GET", p).then(() => true, () => false)) return p; }
+  return now;
+}
 function requestChannel(type) {
   return (CONFIG.REQUEST_CHANNELS || {})[type] || (type === "market" && CONFIG.MARKET_LOG_CHANNEL_ID) || CONFIG.REQUEST_CHANNEL_ID || CONFIG.APPROVAL_CHANNEL_ID;
 }
@@ -878,7 +890,7 @@ function requestDetails(type, st, u) {
 async function syncRequest(env, b) {
   const type = String(b.id).split("-")[0];
   const t = REQUESTS[type] || { title: type === "market" ? "Market Purchase" : "Request" };
-  const path = `/channels/${requestChannel(type)}/messages/${String(b.id).replace(/\D/g, "")}`;
+  const path = await requestMessagePath(env, type, b.id);
   const who = String(b.by || "a roster editor").replace(/@.*$/, "");
   let row = null, dmText = null, colour = CONFIG.COLOURS.approved;
   if (b.status === "Claimed") row = type === "award" ? websiteRow(env, `Claimed by ${b.by || "someone"} (website)`) : claimedRow(type, "web", `${b.by || "someone"} (roster)`);
