@@ -2604,6 +2604,36 @@ async function myStatsCommand(env, i) {
   }
 }
 
+// ---- /myloa: the caller's own LOA status, privately ----
+const loaDay = k => { const d = new Date(String(k) + "T12:00:00Z"); return isNaN(d) ? String(k) : d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }); };
+const loaDays = (a, b) => Math.round((Date.parse(b + "T12:00:00Z") - Date.parse(a + "T12:00:00Z")) / 86400000);
+const plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
+async function myLoaCommand(env, i) {
+  try {
+    const u = caller(i);
+    const r = await bridge(env, { action: "myLoa", byId: u.id, byName: u.username || "" });
+    if (!r.ok) throw new Error(r.error || "the roster didn't answer");
+    if (!r.person) return editReply(env, i, `You aren't on the roster under your Discord name (**${u.username}**). Use **/link** to connect your account.`);
+    const fields = [];
+    let status, colour = CONFIG.COLOURS.info;
+    if (r.current) {
+      const left = loaDays(r.today, r.current.end) + 1;
+      status = `🟦 **You're on LOA** until **${loaDay(r.current.end)}** (${left <= 1 ? "last day today" : plural(left, "day") + " left, including today"}).`;
+      colour = CONFIG.COLOURS.pending;
+      fields.push({ name: "Current LOA", value: `${loaDay(r.current.start)} → ${loaDay(r.current.end)} · ${plural(loaDays(r.current.start, r.current.end) + 1, "day")}`, inline: false });
+    } else status = r.eligible ? "You're **not on LOA**." : `You're **not on LOA**. LOAs are for Management and Department Leadership (your rank is ${r.person.rank || "not set"}).`;
+    if ((r.upcoming || []).length) fields.push({ name: "Coming up", inline: false, value: r.upcoming.map(x =>
+      `${loaDay(x.start)} → ${loaDay(x.end)} · starts in ${plural(loaDays(r.today, x.start), "day")}`).join("\n").slice(0, 1024) });
+    if ((r.requests || []).length) fields.push({ name: "Requests being decided", inline: false, value: r.requests.map(x =>
+      `• ${x.time || "LOA request"}${x.kind ? " (" + x.kind + ")" : ""} · ${x.status === "Pending" ? "waiting for CPM" : x.status === "Error" ? "approved, still being added" : "approved, being added"} · sent <t:${ts(Date.parse(x.at))}:R>`).join("\n").slice(0, 1024) });
+    if (!r.current && r.last) fields.push({ name: "Last LOA", value: `${loaDay(r.last.start)} → ${loaDay(r.last.end)} · ended ${plural(loaDays(r.last.end, r.today), "day")} ago`, inline: false });
+    await editReply(env, i, "", [{ author: { name: CONFIG.NAME }, title: "Your LOA status", description: status, color: colour, fields,
+      footer: { text: "Only you can see this" + (r.eligible ? " · Request an LOA with /loa" : "") }, timestamp: new Date().toISOString() }]);
+  } catch (err) {
+    await editReply(env, i, "Couldn't load your LOA status: " + err.message).catch(() => {});
+  }
+}
+
 // ---- /link ----
 async function linkCommand(env, i, o) {
   try {
@@ -3681,7 +3711,7 @@ async function handleCommunity(i, env, ctx) {
   }
 
   if (i.type === T.COMMAND) {
-    const needsRoster = ["event", "profile", "leaderboard", "mystats", "link", "roster"].indexOf(name) !== -1;
+    const needsRoster = ["event", "profile", "leaderboard", "mystats", "myloa", "link", "roster"].indexOf(name) !== -1;
     if (needsRoster && !linked(env) && !(name === "event" && (f.sub === "list" || f.sub === "log"))) return reply("The roster isn't linked yet.");
     if (name === "event" && f.sub === "schedule") { ctx.waitUntil(o.title && o.date && o.time ? eventSchedule(env, i, o) : evpOpen(env, i, o)); return deferred(); }
     if (name === "event" && f.sub === "cancel") { ctx.waitUntil(eventCancel(env, i, o)); return deferred(); }
@@ -3690,6 +3720,7 @@ async function handleCommunity(i, env, ctx) {
     if (name === "profile") { ctx.waitUntil(profileCommand(env, i, o)); return deferred(o); }
     if (name === "leaderboard") { ctx.waitUntil(leaderboardCommand(env, i)); return deferred(o); }
     if (name === "mystats") { ctx.waitUntil(myStatsCommand(env, i)); return deferred(); }
+    if (name === "myloa") { ctx.waitUntil(myLoaCommand(env, i)); return deferred(); }
     if (name === "market") { ctx.waitUntil(marketCommand(env, i)); return deferred(); }
     if (name === "link") { ctx.waitUntil(linkCommand(env, i, o)); return deferred(); }
     if (name === "roster" && f.sub === "start") { ctx.waitUntil(rosterStart(env, i)); return deferred(); }
@@ -3734,6 +3765,7 @@ const COMMUNITY_COMMANDS = [
   { name: "leaderboard", description: "This month's top hosts and attendees", dm_permission: false, options: [
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
   { name: "mystats", description: "Your stats: this month, weekly quota and promotion progress (only you see it)", dm_permission: false },
+  { name: "myloa", description: "Your LOA status: current, upcoming and requests waiting (only you see it)", dm_permission: false },
   { name: "link", description: "Link to your roster entry and get your rank, department, award and staff roles", dm_permission: false, options: [
     { type: 3, name: "name", description: "First time: pick your roster name. Already linked: leave empty to update your roles", required: false, autocomplete: true, max_length: 60 }] },
   { name: "roster", description: "Apply to be rostered, or update your rank / details", dm_permission: false, options: [
