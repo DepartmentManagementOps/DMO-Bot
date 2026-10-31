@@ -66,6 +66,7 @@ const CONFIG = {
   EVENTS_CHANNEL_ID: "",        // event announcements + reminders
   SELFTEST_CHANNEL_ID: "1565825275533730042",   // weekly self-test report ("" = only post when something is wrong, in the approval-logs channel)
   MARKET_LOG_CHANNEL_ID: "1525333050471481454",
+  EVENT_BOOKINGS_CHANNEL_ID: "1488298218050814042",   // every /event schedule booking is posted here (pings the host and supervisor)
   MARKET_TICKET_CHANNEL_ID: "1488308159935418479",   // #support-line: Market items that need approval ask buyers to open a Misc ticket here    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
   // Market perks that are just a Discord role: bought instantly (points taken, role given straight away, and taken
   // off again when the perk runs out). Matched to the shop item and the server role by name ("Perms" = "Permission").
@@ -2045,11 +2046,42 @@ async function eventSchedule(env, i, o) {
       if (st) { st.seen[evKey(e)] = Date.now(); if (msg) st.msg[evKey(e)] = msg.id; await kvPut(env, "state:events", st); }
       if (msg) note = `\nAnnounced in <#${CONFIG.EVENTS_CHANNEL_ID}>.`;
     } catch (err) { note = `\nNot announced (${err.message}).`; }
+    // The bookings channel: the booking in the department's format, pinging the host and supervisor.
+    if (CONFIG.EVENT_BOOKINGS_CHANNEL_ID) {
+      try {
+        const hostId = o.hostId || (!o.host ? u.id : await discordIdForEmp(env, e.hostEmp));
+        const posted = await postBooking(env, e, { type: o.__type && o.__type !== "Other" ? o.__type : e.title, hostId, co: o.co || [], supId: o.supervisor || "", supName: supervisor, notes: String(o.description || "").trim() });
+        if (posted) note += `\nPosted in <#${CONFIG.EVENT_BOOKINGS_CHANNEL_ID}>.`;
+      } catch (err) { note += `\nNot posted in <#${CONFIG.EVENT_BOOKINGS_CHANNEL_ID}> (${err.message}).`; }
+    }
     const tzNote = `\n-# Time read in ${zoneLabel(tz, when.ms)} (${from}).` + (!dev && !o.timezone && tzLink ? " Press the button to use your device's time zone from now on." : "");
     await editOriginal(env, i, { content: "Event scheduled on the HQ." + note + tzNote, embeds: [eventEmbed(e, "")], components: tzRow, allowed_mentions: NO_PINGS });
   } catch (err) {
     await editReply(env, i, "Couldn't schedule it: " + err.message).catch(() => {});
   }
+}
+
+/** A roster entry's linked Discord account, or "". */
+async function discordIdForEmp(env, emp) {
+  if (!emp) return "";
+  const l = await bridge(env, { action: "links", emp }).catch(() => null);
+  return (l && l.ok && (l.links || [])[0] && l.links[0].discordId) || "";
+}
+/** Posts a booking in CONFIG.EVENT_BOOKINGS_CHANNEL_ID (pinging the host and supervisor); kept so a cancel can mark it. */
+async function postBooking(env, e, b) {
+  const who = (id, name) => id ? `<@${id}>` : (name || "None");
+  const s = ts(e.start);
+  const content = [
+    `Host: ${who(b.hostId, e.host)}`,
+    `Co-Host(s): ${b.co.length ? b.co.map(p => `<@${p.id}>`).join(", ") : "None"}`,
+    `Event Type: ${b.type}`,
+    `Time: <t:${s}:F> (<t:${s}:R>) · ${fmtMins(e.minutes)}`,
+    `Supervisor: ${b.supId ? `<@${b.supId}>` : (b.supName || "None")}`,
+    `Notes: ${b.notes ? b.notes.slice(0, 1500) : "None"}`].join("\n");
+  const msg = await discord(env, "POST", `/channels/${CONFIG.EVENT_BOOKINGS_CHANNEL_ID}/messages`,
+    { content, allowed_mentions: { parse: [], users: [b.hostId, b.supId].filter(Boolean) } });
+  if (msg && msg.id && env.BOT_KV) await kvPut(env, "bookpost:" + evKey(e), msg.id, 40 * 86400);
+  return msg;
 }
 
 // The "Set your time zone first" buttons: schedule the kept event with the saved device time zone (or the roster one).
@@ -2069,11 +2101,11 @@ function eventScheduleButton(env, ctx, i) {
 // ---- /event schedule form: three short steps, nothing to type ----
 //   1. What and when: event type + day          2. Start time: only free times (an hour clear of other events)
 //   3. Check and book: summary, optional supervisor (a server member on the roster), length / title / details
-// State lives in the components' custom_ids ("evp:<action>:<type>~<day>~<HHMM>~<min>~<supervisor id>~<step>~<from>~<zone>");
-// title, host and details in the message's own fields.
+// State lives in the components' custom_ids ("evp:<action>:<type>~<day>~<HHMM>~<min>~<step>~<from>~<zone>");
+// title, details and the people (host, co-hosts, supervisor: "<@id> · roster name") in the message's own fields.
 const EVP_GAP = 3600000, EVP_DAYS = 14, EVP_STEP = 30, EVP_LEN = 30;   // EVP_LEN: default event length (minutes)
-const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || EVP_LEN, st.s || "", st.p || 1, st.f || "", st.z || ""].join("~");
-function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || EVP_LEN, s: p[4] || "", p: +p[5] || 1, f: p[6] || "", z: p.slice(7).join("~") }; }
+const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || EVP_LEN, st.p || 1, st.f || "", st.z || ""].join("~");
+function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || EVP_LEN, p: +p[4] || 1, f: p[5] || "", z: p.slice(6).join("~") }; }
 const EVP_FROM = { d: "your device", r: "your roster time zone", t: "as typed", u: "no time zone saved" };
 function tzOff(tz, ms) { const f = tzOffsetMinutes(tz); if (f !== null) return f; const z = validZone(tz); return z ? zoneOffset(z, ms) : 0; }
 function wallToMs(tz, y, mo, d, h, mi) { const wall = Date.UTC(y, mo - 1, d, h, mi); let ms = wall - tzOff(tz, wall) * 60000; return wall - tzOff(tz, ms) * 60000; }
@@ -2122,11 +2154,13 @@ async function rosterPersonForUser(env, roster, userId, username) {
   if (!p) p = find(await loadRoster(env, 0).catch(() => null));   // just added to the roster: fetch it again
   return p || null;
 }
-/** Title, host, supervisor name and details, read back from the form message. */
+/** Title, details and people, read back from the form message. People: { id, name } ("<@id> · name" in the fields). */
+const evpPeople = v => [...String(v || "").matchAll(/<@!?(\d+)> · ([^,\n]+)/g)].map(m => ({ id: m[1], name: m[2].trim() }));
+const evpPeopleText = list => list.length ? list.map(p => `<@${p.id}> · ${p.name}`).join(", ") : "None";
 function evpFields(message) {
   const f = {}; ((((message || {}).embeds || [])[0] || {}).fields || []).forEach(x => { f[x.name] = x.value; });
   const v = k => (f[k] && f[k] !== "—" && f[k] !== "None" ? f[k] : "");
-  return { title: v("Title"), host: v("Host"), sup: v("Supervisor"), details: v("Details") };
+  return { title: v("Title"), details: v("Details"), host: evpPeople(f.Host)[0] || null, co: evpPeople(f["Co-hosts"]), sup: evpPeople(f.Supervisor)[0] || null };
 }
 function evpView(st, x, busy, note) {
   const days = evpDays(st.z), free = st.d ? evpFree(st.z, st.d, st.m, busy) : [];
@@ -2137,8 +2171,9 @@ function evpView(st, x, busy, note) {
   const zoneLine = `-# Times are in ${zoneLabel(st.z, chosen ? chosen.ms : Date.now())} (${EVP_FROM[st.f] || "your time zone"}).`;
   const sofar = [st.t !== null ? `**${EVENT_TYPES[st.t]}**` : "", day ? day.description : "", chosen ? chosen.label : ""].filter(Boolean).join(" · ");
   // Kept on every step (the form reads them back), shown in full on step 3.
-  const keep = [{ name: "Title", value: x.title || "—", inline: true }, { name: "Host", value: x.host || "—", inline: true },
-    { name: "Supervisor", value: x.sup || "None", inline: true }].concat(x.details ? [{ name: "Details", value: x.details.slice(0, 1000), inline: false }] : []);
+  const keep = [{ name: "Title", value: x.title || "—", inline: true }, { name: "Host", value: x.host ? evpPeopleText([x.host]) : "—", inline: true },
+    { name: "Supervisor", value: evpPeopleText(x.sup ? [x.sup] : []), inline: true }, { name: "Co-hosts", value: evpPeopleText(x.co || []).slice(0, 1024), inline: false }]
+    .concat(x.details ? [{ name: "Details", value: x.details.slice(0, 1000), inline: false }] : []);
   const embed = { author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, footer: { text: `Step ${st.p} of 3 · Only you can see this` } };
   let rows;
   if (st.p === 1) {
@@ -2161,9 +2196,13 @@ function evpView(st, x, busy, note) {
       { name: "Event", value: st.t !== null ? EVENT_TYPES[st.t] : "—", inline: true },
       { name: "Starts", value: chosen ? `<t:${ts(chosen.ms)}:F>\n<t:${ts(chosen.ms)}:R>` : "—", inline: true },
       { name: "Length", value: fmtMins(st.m), inline: true }].concat(keep) });
+    const users = (id, ph, min, max, list) => ({ type: 1, components: [{ type: 5, custom_id: "evp:" + id + ":" + enc(), placeholder: ph, min_values: min, max_values: max,
+      default_values: list.map(p => ({ id: p.id, type: "user" })) }] });
     rows = [
-      { type: 1, components: [{ type: 5, custom_id: "evp:sup:" + enc(), placeholder: x.sup ? "Supervisor: " + x.sup : "Supervisor, System Inspector+ (only if needed)", min_values: 0, max_values: 1 }] },
-      { type: 1, components: [btn("Book event", "book", 3, !chosen || !x.title), btn("Change length, title or details", "more", 2), btn("Back", "to2", 2), btn("Cancel", "cancel", 2)] }];
+      users("host", "Host", 1, 1, x.host ? [x.host] : []),
+      users("co", "Co-hosts (optional, up to 10)", 0, 10, x.co || []),
+      users("sup", "Supervisor, System Inspector+ (only if needed)", 0, 1, x.sup ? [x.sup] : []),
+      { type: 1, components: [btn("Book event", "book", 3, !chosen || !x.title || !x.host), btn("Change length, title or details", "more", 2), btn("Back", "to2", 2), btn("Cancel", "cancel", 2)] }];
   }
   if (!note && st.t !== null && !x.title && st.p === 3) note = "This event needs a title: press **Change length, title or details**.";
   return { content: note || "", allowed_mentions: NO_PINGS, embeds: [embed], components: rows };
@@ -2180,12 +2219,12 @@ async function evpOpen(env, i, o) {
     if (o.timezone && !typed) return editReply(env, i, `"${o.timezone}" isn't a time zone. Pick one from the list, or leave it empty.`);
     if (!typed && !dev && o.__tz !== "roster" && env.BOT_KV && env.SHEETS_SECRET) return eventSchedule(env, i, o);   // asks for the time zone first
     const z = typed || dev || (me && me.z ? cleanTimezone(me.z) : "UTC");
-    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || EVP_LEN)), s: "", p: 1, f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
-    const x = { title: cleanLine(o.title, 100), host: cleanLine(o.host, 60) || (me ? (me.r || me.d) : callerName(i)), sup: "", details: String(o.description || "").trim().slice(0, 1000) };
+    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || EVP_LEN)), p: 1, f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
+    const x = { title: cleanLine(o.title, 100), host: me ? { id: u.id, name: me.r || me.d } : null, co: [], sup: null, details: String(o.description || "").trim().slice(0, 1000) };
     let supNote = "";
     if (o.supervisor) {
       const sv = await supervisorFor(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || ""));
-      if (sv.name) { st.s = String(o.supervisor); x.sup = sv.name; } else supNote = sv.error;
+      if (sv.name) x.sup = { id: String(o.supervisor), name: sv.name }; else supNote = sv.error;
     }
     return editOriginal(env, i, evpView(st, x, await evpBusy(env), supNote));
   } catch (err) {
@@ -2201,7 +2240,6 @@ function evpAction(env, ctx, i) {
     return { type: R.MODAL, data: { custom_id: "evp:form:" + evpEnc(st), title: "Length, title & details", components: [
       box("title", "Title", 1, 100, x.title || (st.t !== null && EVENT_TYPES[st.t] !== "Other" ? EVENT_TYPES[st.t] : ""), true, "e.g. Patrol"),
       box("length", "Length in minutes", 1, 3, st.m, true, "30"),
-      box("host", "Host (roster name)", 1, 60, x.host, false, "Leave empty for yourself"),
       box("details", "Details", 2, 1000, x.details, false, "What it's about (optional)")] } };
   }
   ctx.waitUntil((async () => {
@@ -2217,13 +2255,23 @@ function evpAction(env, ctx, i) {
     if (act === "to1") st.p = 1;
     if (act === "to2") st.p = 2;
     if (act === "to3") st.p = 3;
+    const uname = id => String(((((i.data || {}).resolved || {}).users || {})[id] || {}).username || "");
     if (act === "sup") {
-      if (!v) { st.s = ""; x.sup = ""; }
+      if (!v) x.sup = null;
       else {
-        const roster = await loadRoster(env).catch(() => null);
-        const sv = await supervisorFor(env, roster, v, String(((((i.data || {}).resolved || {}).users || {})[v] || {}).username || ""));
-        if (sv.name) { st.s = v; x.sup = sv.name; } else note = sv.error;
+        const sv = await supervisorFor(env, await loadRoster(env).catch(() => null), v, uname(v));
+        if (sv.name) x.sup = { id: v, name: sv.name }; else note = sv.error;
       }
+    }
+    if (act === "host" && v) {
+      const p = await rosterPersonForUser(env, await loadRoster(env).catch(() => null), v, uname(v));
+      if (p) x.host = { id: v, name: p.r || p.d }; else note = `<@${v}> isn't on the roster (or linked with /link), so they can't host.`;
+    }
+    if (act === "co") {
+      const roster = await loadRoster(env).catch(() => null), ok = [], bad = [];
+      for (const id of (i.data.values || []).slice(0, 10)) { const p = await rosterPersonForUser(env, roster, id, uname(id)); if (p) ok.push({ id, name: p.r || p.d }); else bad.push(`<@${id}>`); }
+      x.co = ok;
+      if (bad.length) note = bad.join(", ") + (bad.length === 1 ? " isn't" : " aren't") + " on the roster (or linked with /link), so " + (bad.length === 1 ? "they weren't" : "they weren't") + " added as co-hosts.";
     }
     if (act === "form") {
       const f = modalValues(i);
@@ -2231,18 +2279,17 @@ function evpAction(env, ctx, i) {
       if (!(len >= 5 && len <= 720)) note = "The length must be between 5 and 720 minutes.";
       else st.m = len;
       x.title = cleanLine(f.title, 100) || x.title;
-      x.host = cleanLine(f.host, 60) || x.host;
       x.details = String(f.details || "").trim().slice(0, 1000);
     }
     const busy = await evpBusy(env);
     if (act === "book") {
       const stillFree = st.d && evpFree(st.z, st.d, st.m, busy).some(t => t.hhmm === st.h);
       if (!st.h || !stillFree) return editOriginal(env, i, evpView(st, x, busy, "That start time has just been taken. Pick another."));
-      if (!x.title) return editOriginal(env, i, evpView(st, x, busy));
+      if (!x.title || !x.host) return editOriginal(env, i, evpView(st, x, busy));
       const p = dayParts(st.d);
       return eventSchedule(env, i, { title: x.title, date: `${p.y}-${String(p.mo).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`,
-        time: st.h.slice(0, 2) + ":" + st.h.slice(2), length: st.m, timezone: st.z, host: x.host, description: x.details,
-        supervisor: st.s || "", __supName: x.sup, __from: EVP_FROM[st.f] });
+        time: st.h.slice(0, 2) + ":" + st.h.slice(2), length: st.m, timezone: st.z, host: x.host.name, hostId: x.host.id, co: x.co || [], description: x.details,
+        supervisor: x.sup ? x.sup.id : "", __supName: x.sup ? x.sup.name : "", __type: st.t !== null ? EVENT_TYPES[st.t] : "", __from: EVP_FROM[st.f] });
     }
     const view = evpView(st, x, busy, note);
     if (act === "form" && st.p === 2 && !note) view.content = "That length doesn't fit the time you picked any more. Choose another start time.";
@@ -2271,6 +2318,13 @@ async function eventCancel(env, i, o) {
       if (st) { st.cancelled = st.cancelled || {}; st.cancelled[k] = Date.now(); await kvPut(env, "state:events", st); }
       if (msg) note = ` Posted in <#${CONFIG.EVENTS_CHANNEL_ID}>.`;
     } catch (err) { /* the HQ change is what matters */ }
+    // The booking post: marked as cancelled.
+    const postId = CONFIG.EVENT_BOOKINGS_CHANNEL_ID ? await kvGet(env, "bookpost:" + evKey(e), null) : null;
+    if (postId) {
+      const path = `/channels/${CONFIG.EVENT_BOOKINGS_CHANNEL_ID}/messages/${postId}`;
+      const m = await discord(env, "GET", path).catch(() => null);
+      if (m) await discord(env, "PATCH", path, { content: ("**Cancelled** by " + callerName(i) + "\n" + String(m.content || "").split("\n").map(l => "~~" + l + "~~").join("\n")).slice(0, 2000), allowed_mentions: NO_PINGS }).catch(() => {});
+    }
     await editReply(env, i, `**${e.title}** (<t:${ts(start)}:F>) has been cancelled and removed from the HQ.` + note);
   } catch (err) {
     await editReply(env, i, "Couldn't cancel it: " + err.message).catch(() => {});
