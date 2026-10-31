@@ -2013,7 +2013,7 @@ async function eventCancel(env, i, o) {
     const u = caller(i);
     const res = await bridge(env, { action: "cancelEvent", id: "evc-" + i.id, start: start, title: title, byId: u.id, byName: u.username || "" })
       .catch(err => ({ ok: false, error: err.message }));
-    if (!res.ok) return editReply(env, i, "Couldn't cancel it: " + res.error);
+    if (!res.ok) return editReply(env, i, res.notMine ? res.error : "Couldn't cancel it: " + res.error);
     const e = { start: start, minutes: Number(res.minutes) || 0, title: res.title || title, host: res.host || "", description: "" };
     let note = "";
     try {
@@ -3340,7 +3340,7 @@ const COMMUNITY_COMMANDS = [
       { type: 3, name: "timezone", description: "The time zone you typed the time in (default: your device's, else your roster one)", required: false, autocomplete: true, max_length: 40 },
       { type: 3, name: "host", description: "Host (default: you)", required: false, autocomplete: true, max_length: 60 },
       { type: 3, name: "description", description: "What it's about", required: false, max_length: 1000 }] },
-    { type: 1, name: "cancel", description: "Cancel an upcoming event (Management+)", options: [
+    { type: 1, name: "cancel", description: "Cancel an event you booked", options: [
       { type: 3, name: "event", description: "Start typing the event's name", required: true, autocomplete: true }] },
     { type: 1, name: "log", description: "Log an event for approval", options: [
         { type: 3, name: "type", description: "What kind of event it was", required: true,
