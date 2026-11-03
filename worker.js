@@ -541,7 +541,7 @@ const REQUESTS = {
     format: ["roblox", "discord", "award", "proof", "ping"]
   },
   loa: {
-    command: "loa", description: "Request a leave of absence (Management+ only)", title: "LOA Request", icon: "🏖️",
+    command: "loa", description: "Request a leave of absence (Management+ only)", title: "LOA Request", editTitle: "LOA Change Request", icon: "🏖️",
     options: [
       { type: 3, name: "start", description: "First day of the LOA (DD/MM/YYYY)", required: true, min_length: 8, max_length: 10 },
       { type: 3, name: "end", description: "Last day of the LOA (DD/MM/YYYY)", required: true, min_length: 8, max_length: 10 },
@@ -779,6 +779,7 @@ function requestPanelAction(env, ctx, i) {
 function requestText(type, st, submitter) {
   const t = REQUESTS[type];
   if (type === "roster" && st.mode === "update") return updateText(st, submitter);
+  if (type === "loa" && st.mode === "edit") return loaEditText(st, submitter);
   const lines = [`**${t.title}**`];
   const show = (v, empty) => cleanLine(Array.isArray(v) ? v.join(", ") : v, 300) || empty || "—";
   t.format.forEach(key => {
@@ -798,6 +799,25 @@ function requestText(type, st, submitter) {
   });
   const typedDiscord = cleanLine(st.discord, 40);
   if (typedDiscord && typedDiscord.toLowerCase() !== String(submitter.username).toLowerCase()) lines.push(`-# Sent by ${submitter.username} (<@${submitter.id}>)`);
+  if (submitter.warning) lines.push("-# ⚠️ " + submitter.warning);
+  return lines.join("\n");
+}
+
+// /loaedit: the LOA as it is, and the change asked for.
+const loaSpanDays = (a, b) => Math.round((Date.parse(b + "T12:00:00Z") - Date.parse(a + "T12:00:00Z")) / 86400000) + 1;
+const ukSpan = (a, b) => `${isoToUk(a)} – ${isoToUk(b)} (${loaSpanDays(a, b)} day${loaSpanDays(a, b) === 1 ? "" : "s"})`;
+function loaEditChange(st) {
+  if (st.cancel) return st.when === "now" ? "End it now (yesterday becomes the last day)" : "Cancel it";
+  return `~~${isoToUk(st.from.start)} – ${isoToUk(st.from.end)}~~ → **${ukSpan(st.to.start, st.to.end)}**`;
+}
+function loaEditText(st, submitter) {
+  const lines = [`**${REQUESTS.loa.editTitle}**`,
+    `Discord Username: ${submitter.username} (<@${submitter.id}>)`,
+    `Roblox Username: ${cleanLine(st.roblox, 60) || "—"}`,
+    `${st.started ? "Current" : "Upcoming"} LOA: ${ukSpan(st.from.start, st.from.end)}`,
+    `Change: ${loaEditChange(st)}`,
+    `Reason: ${cleanLine(st.reason, 300) || "—"}`,
+    `Notes: ${cleanLine(st.notes, 300) || "None"}`];
   if (submitter.warning) lines.push("-# ⚠️ " + submitter.warning);
   return lines.join("\n");
 }
@@ -827,11 +847,11 @@ async function sendRequest(env, i, type, st, att) {
     const check = await checkRequest(env, i, type, st);       // also tidies names to their roster spelling
     if (check.problems.length) {
       const embed = { color: CONFIG.COLOURS.denied, author: { name: CONFIG.NAME }, title: t.title + " not sent",
-        description: check.problems.map(p => "• " + p).join("\n").slice(0, 3800) + "\n\nRun **" + (st.code ? "/roster submit" : "/" + t.command) + "** again." };
+        description: check.problems.map(p => "• " + p).join("\n").slice(0, 3800) + "\n\nRun **" + (st.code ? "/roster submit" : st.mode === "edit" ? "/loaedit" : "/" + t.command) + "** again." };
       if (fromPanel) await finish(embed); else await editOriginal(env, i, { embeds: [embed], allowed_mentions: NO_PINGS });
       return;
     }
-    const title = type === "roster" && st.mode === "update" ? t.updateTitle : t.title;
+    const title = type === "roster" && st.mode === "update" ? t.updateTitle : type === "loa" && st.mode === "edit" ? t.editTitle : t.title;
     st.hasProof = !!att;
     const content = requestText(type, st, { id: u.id, username: u.username || "unknown", warning: check.warning }).slice(0, 2000);
     const pingRole = CONFIG.AWARD_PING_ROLE_ID || CONFIG.DMO_ROLE_ID;
@@ -852,7 +872,7 @@ async function sendRequest(env, i, type, st, att) {
       const details = requestDetails(type, st, u);
       const q = await bridge(env, Object.assign({
         action: "request", id: type + "-" + msg.id, title: title, details: details,
-        submittedBy: (i.member && i.member.nick) || u.global_name || u.username, submittedById: u.id,
+        submittedBy: (i.member && i.member.nick) || u.global_name || u.username, submittedById: u.id, byName: u.username || "",
         proof: `https://discord.com/channels/${i.guild_id}/${channel}/${msg.id}`
       }, proof ? { proofName: proof.name, proofType: proof.type, proofData: base64(proof.data) } : {})).catch(e => ({ ok: false, error: e.message }));
       note = q.ok ? "\nYou'll get a DM when it has been decided."
@@ -893,6 +913,9 @@ function requestDetails(type, st, u) {
   if (type === "roster") return Object.assign({ discord: u.username || discord, roblox: cleanLine(st.roblox, 40), tz: cleanTimezone(cleanLine(st.tz, 12)),
     rank: st.rank, ref: st.ref || "", refDiscord: st.refDiscord || "" },
     st.code ? { code: st.code, codeAlt: st.codeAlt || "", robloxId: st.robloxId || "" } : {});
+  if (type === "loa" && st.mode === "edit") return { mode: "edit", discord: u.username || discord, roblox: st.roblox || "", loaId: st.loaId,
+    from: st.from, to: st.to || null, cancel: !!st.cancel, when: st.when || "", time: cleanLine(st.time, 100),
+    reason: String(st.reason || "").trim().slice(0, 300), notes: String(st.notes || "").trim().slice(0, 300) };
   return Object.assign({ discord: discord, roblox: st.roblox || "", time: cleanLine(st.time, 100), reason: String(st.reason || "").trim().slice(0, 300),
     kind: firstValue(st.kind), notes: String(st.notes || "").trim().slice(0, 300) }, st.start ? { start: st.start, end: st.end } : {});
 }
@@ -900,7 +923,7 @@ function requestDetails(type, st, u) {
 // Decisions on the roster's Approvals page -> the request message + a DM.
 async function syncRequest(env, b) {
   const type = String(b.id).split("-")[0];
-  const t = REQUESTS[type] || { title: type === "market" ? "Market Purchase" : "Request" };
+  const t = Object.assign({}, REQUESTS[type] || { title: type === "market" ? "Market Purchase" : "Request" }, b.title ? { title: String(b.title).slice(0, 60) } : {});
   const path = await requestMessagePath(env, type, b.id);
   const who = String(b.by || "a roster editor").replace(/@.*$/, "");
   let row = null, dmText = null, colour = CONFIG.COLOURS.approved;
@@ -2625,10 +2648,10 @@ async function myLoaCommand(env, i) {
     if ((r.upcoming || []).length) fields.push({ name: "Coming up", inline: false, value: r.upcoming.map(x =>
       `${loaDay(x.start)} → ${loaDay(x.end)} · starts in ${plural(loaDays(r.today, x.start), "day")}`).join("\n").slice(0, 1024) });
     if ((r.requests || []).length) fields.push({ name: "Requests being decided", inline: false, value: r.requests.map(x =>
-      `• ${x.time || "LOA request"}${x.kind ? " (" + x.kind + ")" : ""} · ${x.status === "Pending" ? "waiting for CPM" : x.status === "Error" ? "approved, still being added" : "approved, being added"} · sent <t:${ts(Date.parse(x.at))}:R>`).join("\n").slice(0, 1024) });
+      `• ${x.edit ? "Change: " : ""}${x.time || (x.edit ? "LOA change" : "LOA request")}${x.kind ? " (" + x.kind + ")" : ""} · ${x.status === "Pending" ? "waiting for CPM" : x.status === "Error" ? "approved, still being added" : "approved, being added"} · sent <t:${ts(Date.parse(x.at))}:R>`).join("\n").slice(0, 1024) });
     if (!r.current && r.last) fields.push({ name: "Last LOA", value: `${loaDay(r.last.start)} → ${loaDay(r.last.end)} · ended ${plural(loaDays(r.last.end, r.today), "day")} ago`, inline: false });
     await editReply(env, i, "", [{ author: { name: CONFIG.NAME }, title: "Your LOA status", description: status, color: colour, fields,
-      footer: { text: "Only you can see this" + (r.eligible ? " · Request an LOA with /loa" : "") }, timestamp: new Date().toISOString() }]);
+      footer: { text: "Only you can see this" + (r.eligible ? " · Request an LOA with /loa, change one with /loaedit" : "") }, timestamp: new Date().toISOString() }]);
   } catch (err) {
     await editReply(env, i, "Couldn't load your LOA status: " + err.message).catch(() => {});
   }
@@ -2703,6 +2726,48 @@ async function loaCommand(env, i, o) {
     await sendRequest(env, i, "loa", st, null);
   } catch (err) {
     await editReply(env, i, "Couldn't send your LOA: " + err.message).catch(() => {});
+  }
+}
+
+// ---- /loaedit (Management+): new dates for your LOA, or end / cancel it -> CPM approve it like an LOA request ----
+async function loaEditCommand(env, i, o) {
+  try {
+    const u = caller(i);
+    const r = await bridge(env, { action: "myLoa", byId: u.id, byName: u.username || "" });
+    if (!r.ok) throw new Error(r.error || "the roster didn't answer");
+    if (!r.person) return editReply(env, i, `You aren't on the roster under your Discord name (**${u.username}**). Use **/link** to connect your account.`);
+    if (!r.eligible) return editReply(env, i, `LOAs are for Management and Department Leadership (your rank is ${r.person.rank || "not set"}).`);
+    const next = (r.upcoming || [])[0] || null;
+    const target = o.which === "next" ? next : o.which === "current" ? r.current : (r.current || next);
+    if (!target) return editReply(env, i, o.which === "next" ? "You don't have an upcoming LOA."
+      : o.which === "current" ? "You aren't on LOA right now." + (next ? " To change your next one, use **which: My next upcoming LOA**." : "")
+      : "You don't have a current or upcoming LOA to change. Request one with **/loa**.");
+    if (!target.id) return editReply(env, i, "The roster needs an update before LOAs can be changed this way. Ask CPM to change it for now.");
+    if ((r.requests || []).some(x => x.edit && Number(x.loaId) === Number(target.id) && x.status === "Pending"))
+      return editReply(env, i, "You already have a change to that LOA waiting for CPM. Wait for it to be decided (see **/myloa**), then try again.");
+    const today = r.today, started = target.start <= today;
+    const st = { mode: "edit", loaId: target.id, from: { start: target.start, end: target.end }, started,
+      reason: String(o.reason || "").trim().slice(0, 300), notes: String(o.notes || "").trim().slice(0, 300) };
+    if (o.change === "cancel") {
+      st.cancel = true;
+      st.when = started ? "now" : "";
+      st.time = (started ? "End " : "Cancel ") + `${isoToUk(target.start)} – ${isoToUk(target.end)}` + (started ? " now" : "");
+    } else {
+      if (!o.start && !o.end) return editReply(env, i, "Give the new **end** date (and the new **start**, if it hasn't started yet), as DD/MM/YYYY.");
+      const s = o.start ? ukToIso(o.start) : target.start, e = o.end ? ukToIso(o.end) : target.end;
+      if (!s || !e) return editReply(env, i, "Use DD/MM/YYYY for the dates, e.g. 07/10/2026.");
+      if (started && s !== target.start) return editReply(env, i, `Your LOA started on ${isoToUk(target.start)}, so its start date can't change. Change the **end** date, or choose **End it early, or cancel it**.`);
+      if (!started && s < today) return editReply(env, i, "The new start date has already passed.");
+      if (e < s) return editReply(env, i, "The end date can't be before the start date.");
+      if (e < today) return editReply(env, i, "The new end date has already passed. To end your LOA now, choose **End it early, or cancel it**.");
+      if (loaSpanDays(s, e) > 120) return editReply(env, i, "LOAs can be at most 120 days. Speak to Leadership about a longer one.");
+      if (s === target.start && e === target.end) return editReply(env, i, "Those are the dates it already has.");
+      st.to = { start: s, end: e };
+      st.time = `${isoToUk(target.start)} – ${isoToUk(target.end)} → ${isoToUk(s)} – ${isoToUk(e)}`;
+    }
+    await sendRequest(env, i, "loa", st, null);
+  } catch (err) {
+    await editReply(env, i, "Couldn't send your LOA change: " + err.message).catch(() => {});
   }
 }
 
@@ -2864,6 +2929,10 @@ function requestDecisionAction(env, ctx, i) {
     return { type: R.MODAL, data: { custom_id: "rq:noform:" + kind, title: ("Deny " + title).slice(0, 45),
       components: [box("reason", "Reason (sent to them in a DM)", 2, 500, "Why it's denied")] } };
   }
+  if (kind === "loa" && isLoaEditMessage(i.message)) {
+    ctx.waitUntil(decideRequest(env, i, "loa", "approve", {}));
+    return { type: R.DEFER_UPDATE };
+  }
   if (kind === "loa") {
     const timeLine = (String(i.message.content || "").match(/^Time: (.*)$/m) || [])[1] || "";
     const g = guessDates(timeLine);
@@ -2891,6 +2960,7 @@ function requestDecisionSubmit(env, ctx, i) {
   return { type: R.DEFER_UPDATE };
 }
 
+const isLoaEditMessage = m => String((m || {}).content || "").startsWith(`**${REQUESTS.loa.editTitle}**`);
 async function decideRequest(env, i, kind, decision, extra) {
   const id = kind === "event" ? i.message.id : kind + "-" + i.message.id;
   const u = caller(i), who = callerName(i);
@@ -2924,7 +2994,8 @@ async function decideRequest(env, i, kind, decision, extra) {
     await discord(env, "PATCH", `/channels/${i.channel_id}/messages/${i.message.id}`,
       { components: [statusRow(`${what}Approved by ${who}. Adding to the roster…`, "⏳")], allowed_mentions: NO_PINGS }).catch(() => {});
   } else {
-    await syncRequest(env, { id: id, status: "Denied", by: who, reason: extra.reason, submittedById: res.submittedById || "" });
+    await syncRequest(env, { id: id, status: "Denied", by: who, reason: extra.reason, submittedById: res.submittedById || "",
+      title: kind === "loa" && isLoaEditMessage(i.message) ? REQUESTS.loa.editTitle : "" });
   }
 }
 
@@ -3711,7 +3782,7 @@ async function handleCommunity(i, env, ctx) {
   }
 
   if (i.type === T.COMMAND) {
-    const needsRoster = ["event", "profile", "leaderboard", "mystats", "myloa", "link", "roster"].indexOf(name) !== -1;
+    const needsRoster = ["event", "profile", "leaderboard", "mystats", "myloa", "loaedit", "link", "roster"].indexOf(name) !== -1;
     if (needsRoster && !linked(env) && !(name === "event" && (f.sub === "list" || f.sub === "log"))) return reply("The roster isn't linked yet.");
     if (name === "event" && f.sub === "schedule") { ctx.waitUntil(o.title && o.date && o.time ? eventSchedule(env, i, o) : evpOpen(env, i, o)); return deferred(); }
     if (name === "event" && f.sub === "cancel") { ctx.waitUntil(eventCancel(env, i, o)); return deferred(); }
@@ -3721,6 +3792,7 @@ async function handleCommunity(i, env, ctx) {
     if (name === "leaderboard") { ctx.waitUntil(leaderboardCommand(env, i)); return deferred(o); }
     if (name === "mystats") { ctx.waitUntil(myStatsCommand(env, i)); return deferred(); }
     if (name === "myloa") { ctx.waitUntil(myLoaCommand(env, i)); return deferred(); }
+    if (name === "loaedit") { ctx.waitUntil(loaEditCommand(env, i, o)); return deferred(); }
     if (name === "market") { ctx.waitUntil(marketCommand(env, i)); return deferred(); }
     if (name === "link") { ctx.waitUntil(linkCommand(env, i, o)); return deferred(); }
     if (name === "roster" && f.sub === "start") { ctx.waitUntil(rosterStart(env, i)); return deferred(); }
@@ -3766,6 +3838,15 @@ const COMMUNITY_COMMANDS = [
     { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
   { name: "mystats", description: "Your stats: this month, weekly quota and promotion progress (only you see it)", dm_permission: false },
   { name: "myloa", description: "Your LOA status: current, upcoming and requests waiting (only you see it)", dm_permission: false },
+  { name: "loaedit", description: "Change the dates of your LOA, or end / cancel it (sent to CPM for approval)", dm_permission: false, options: [
+    { type: 3, name: "change", description: "What to change", required: true,
+      choices: [{ name: "New dates", value: "dates" }, { name: "End it early, or cancel it", value: "cancel" }] },
+    { type: 3, name: "reason", description: "Why you need the change", required: true, max_length: 300 },
+    { type: 3, name: "end", description: "New dates: the new last day (DD/MM/YYYY)", required: false, min_length: 8, max_length: 10 },
+    { type: 3, name: "start", description: "New dates: the new first day, only if it hasn't started yet (DD/MM/YYYY)", required: false, min_length: 8, max_length: 10 },
+    { type: 3, name: "which", description: "Which LOA (default: your current one, else your next one)", required: false,
+      choices: [{ name: "My current LOA", value: "current" }, { name: "My next upcoming LOA", value: "next" }] },
+    { type: 3, name: "notes", description: "Anything else", required: false, max_length: 300 }] },
   { name: "link", description: "Link to your roster entry and get your rank, department, award and staff roles", dm_permission: false, options: [
     { type: 3, name: "name", description: "First time: pick your roster name. Already linked: leave empty to update your roles", required: false, autocomplete: true, max_length: 60 }] },
   { name: "roster", description: "Apply to be rostered, or update your rank / details", dm_permission: false, options: [
