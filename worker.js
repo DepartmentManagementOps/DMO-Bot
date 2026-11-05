@@ -2671,10 +2671,14 @@ async function linkCommand(env, i, o) {
       const l = res.ok && (res.links || [])[0];
       if (!l) return editReply(env, i, (o.member ? `<@${o.member}> isn't` : "You aren't") + " linked to a roster entry yet. Use **/link name:** and pick the roster name.");
       const p = roster.list.find(x => normEmp(x.e) === normEmp(l.emp)) || ((await loadRoster(env, 10 * 1000).catch(() => roster)) || roster).list.find(x => normEmp(x.e) === normEmp(l.emp));
-      // Already linked: refresh their roles from the roster.
+      // Already linked: their Discord name on the roster follows their account, then their roles are refreshed.
+      const nm = await bridge(env, { action: "syncDiscordName", discordId: u.id, username: u.username || "" }).catch(err => ({ ok: false, error: err.message }));
+      if (nm.changed) ROSTER = null;
+      const nameLine = nm.changed ? `\nYour Discord name on the roster was updated: **${nm.from || "blank"}** → **${nm.to}**.`
+        : nm.ok === false && !nm.notLinked ? `\n⚠️ Your Discord name on the roster couldn't be updated: ${nm.error}` : "";
       const r = CONFIG.GUILD_ID ? await syncRolesFor(env, o.member || u.id, l.emp).catch(err => ({ error: err.message })) : null;
       return editReply(env, i, `${o.member ? `<@${o.member}> is` : "You're"} linked to **${p ? (p.r || p.d) : "#" + l.emp}** (employee #${l.emp})` +
-        (l.at ? ` since <t:${ts(toMs(l.at))}:D>` : "") + "." + (r ? "\n\n" + roleSummary(r) : ""));
+        (l.at ? ` since <t:${ts(toMs(l.at))}:D>` : "") + "." + nameLine + (r ? "\n\n" + roleSummary(r) : ""));
     }
     const p = roster.by[cleanLine(o.name, 60).replace(/^@/, "").toLowerCase()] || (await rosterLookup(env, cleanLine(o.name, 60))).p;
     if (!p) return editReply(env, i, `**${cleanLine(o.name, 60)}** isn't on the roster.`);
@@ -2683,6 +2687,9 @@ async function linkCommand(env, i, o) {
     const targetUser = o.member ? (((i.data.resolved || {}).users || {})[o.member] || {}) : u;
     const self = target === u.id && p.d && String(p.d).replace(/^@/, "").toLowerCase() === String(u.username || "").toLowerCase();
     if (!self) {
+      // Already linked to this entry (their Discord name changed since): update the name instead.
+      const mine = await bridge(env, { action: "links", discordId: u.id }).catch(() => ({}));
+      if (mine.ok && (mine.links || []).some(x => normEmp(x.emp) === normEmp(p.e))) return linkCommand(env, i, Object.assign({}, o, { name: "" }));
       return editReply(env, i, `You can only link to the roster entry with your own Discord name (**${u.username}**). ` +
         `**${p.r || p.d}**'s entry has the Discord name **${p.d || "(none)"}**.\n` +
         "If that entry is you and your Discord name changed, ask DMO to correct the Discord name on the roster (or send **/roster update**), then run **/link** again.");
@@ -3195,14 +3202,35 @@ async function cronAutoLink(env, now, force) {
     await noteRoles(env, "auto-link #" + p.emp, id, r);
     done.push({ id, emp: p.emp, name: p.roblox || p.discord, roles: r && !r.error ? "roles given" : "roles not given: " + ((r && r.error) || "unknown") });
   }
+  // Linked members who changed their Discord username: the roster's Discord name follows (up to 25 a run).
+  const renamed = [];
+  const byId = {};
+  members.forEach(m => { if (m.user && !m.user.bot) byId[m.user.id] = m.user.username; });
+  const ln = await bridge(env, { action: "linkedNames" }).catch(() => ({ ok: false }));
+  for (const p of (ln.ok && ln.people) || []) {
+    if (renamed.length >= 25) break;
+    const now2 = byId[p.discordId];
+    if (!now2 || userKey(now2) === userKey(p.discord)) continue;
+    const r = await bridge(env, { action: "syncDiscordName", discordId: p.discordId, username: now2, how: "auto" }).catch(e => ({ ok: false, error: e.message }));
+    if (r.changed) renamed.push({ id: p.discordId, emp: p.emp, name: p.roblox || r.to, from: r.from, to: r.to });
+    else if (r.clash) renamed.push({ id: p.discordId, emp: p.emp, name: p.roblox || p.discord, clash: r.error });
+  }
+  if (renamed.some(x => !x.clash)) ROSTER = null;
+  st.renamed = (st.renamed || 0) + renamed.filter(x => !x.clash).length;
   st.linked = (st.linked || 0) + done.length;
   await kvPut(env, "state:autolink", st);
-  if (!done.length) return "";
+  const logTo = CONFIG.AUTOLINK_LOG_CHANNEL_ID || CONFIG.SELFTEST_CHANNEL_ID;
+  if (renamed.length && logTo) await discord(env, "POST", `/channels/${logTo}/messages`, { allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info,
+    title: "Discord names updated on the roster", description: renamed.map(d => d.clash ? `• ⚠️ <@${d.id}> (**${d.name}**, #${d.emp}): not updated. ${d.clash.replace(/\*\*/g, "")}`
+      : `• <@${d.id}> **${d.name}** (#${d.emp}): ${d.from || "blank"} → **${d.to}**`).join("\n").slice(0, 4000),
+    footer: { text: "Linked accounts whose Discord username changed. Recorded in the roster's audit trail." }, timestamp: new Date(now).toISOString() }] }).catch(() => {});
+  const renamedText = renamed.filter(x => !x.clash).length ? "renamed " + renamed.filter(x => !x.clash).length : "";
+  if (!done.length) return renamedText;
   const channel = CONFIG.AUTOLINK_LOG_CHANNEL_ID || CONFIG.SELFTEST_CHANNEL_ID;
   if (channel) await discord(env, "POST", `/channels/${channel}/messages`, { allowed_mentions: NO_PINGS, embeds: [{ author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.info,
     title: "Linked automatically", description: done.map(d => `• <@${d.id}> → **${d.name}** (#${d.emp}) · ${d.roles}`).join("\n").slice(0, 4000),
     footer: { text: "Matched by Discord username to unlinked roster entries. Wrong match? Correct the roster's Discord name." }, timestamp: new Date(now).toISOString() }] }).catch(() => {});
-  return "linked " + done.length + ": " + done.map(d => "#" + d.emp).join(", ");
+  return "linked " + done.length + ": " + done.map(d => "#" + d.emp).join(", ") + (renamedText ? " · " + renamedText : "");
 }
 
 async function cronEvents(env, now) {
