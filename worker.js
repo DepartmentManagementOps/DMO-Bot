@@ -3697,7 +3697,7 @@ async function syncRolesFor(env, userId, emp, mode, names, given) {
 const TIER_LABEL = { LR: "Low Rank", MR: "Middle Rank", HR: "High Rank", EX: "Executive", Leadership: "War Council" };
 function roleSummary(r) {
   if (!r) return "";
-  if (r.held) return "You can't be given roster roles right now, so your roles weren't changed. If you think that's wrong, speak to staff.";
+  if (r.held) return "You have been quarantined by the Vertex Automation bot. Wait until an Admin releases you from quarantine.";
   if (r.error) return `Roles not updated (${r.error}).`;
   if (r.noRoles) return r.tooHigh && r.tooHigh.length
     ? `No roles changed: the matching roles (${r.tooHigh.slice(0, 5).join(", ")}${r.tooHigh.length > 5 ? "…" : ""}) are above the bot's role. Move the bot's role above them in Server Settings → Roles.`
