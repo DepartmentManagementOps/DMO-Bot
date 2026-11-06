@@ -70,6 +70,9 @@ const CONFIG = {
   // Automatic linking: server members whose Discord username matches an unlinked roster entry are linked and
   // given their roles (needs Server Members Intent). A note of each run's links goes here ("" = the health report channel).
   AUTO_LINK: true,
+  // Anyone with this role gets no roster roles (from /link or any automatic role update) and keeps whatever they
+  // have now. Take the role off and they get their roles back the next time they run /link.
+  ROLE_HOLD_ROLE_ID: "1568386162760876104",
   AUTOLINK_LOG_CHANNEL_ID: "",   // every /event schedule booking is posted here (pings the host and supervisor)
   MARKET_TICKET_CHANNEL_ID: "1488308159935418479",   // #support-line: Market items that need approval ask buyers to open a Misc ticket here    // where /market purchase requests are posted for approval ("" = the request / approval-logs channel)
   // Market perks that are just a Discord role: bought instantly (points taken, role given straight away, and taken
@@ -3628,6 +3631,9 @@ async function syncRolesFor(env, userId, emp, mode, names, given) {
     : `employee #${emp || "?"} wasn't found on the roster (${ROLE_SOURCE || "roster via bridge"})` };
   const member = await discord(env, "GET", `/guilds/${CONFIG.GUILD_ID}/members/${userId}`).catch(() => null);
   if (!member) return { error: "not in the server" };
+  // Role hold: nothing is given or taken while they have the hold role.
+  if (CONFIG.ROLE_HOLD_ROLE_ID && (member.roles || []).indexOf(CONFIG.ROLE_HOLD_ROLE_ID) !== -1)
+    return { held: true, changes: 0, added: [], removed: [], failed: [], error: "they have the role-hold role, so no roles were given" };
   const plan = await rolePlan(env, byEmp, !ROLE_PLAN || ROLE_PLAN.awardSig !== AWARD_NAMES.join("|"));
   let allow;
   if (String(pick(entry, ["rank"], "")).trim() && tierOf(entry) && env.BOT_KV) {
@@ -3691,6 +3697,7 @@ async function syncRolesFor(env, userId, emp, mode, names, given) {
 const TIER_LABEL = { LR: "Low Rank", MR: "Middle Rank", HR: "High Rank", EX: "Executive", Leadership: "War Council" };
 function roleSummary(r) {
   if (!r) return "";
+  if (r.held) return "You can't be given roster roles right now, so your roles weren't changed. If you think that's wrong, speak to staff.";
   if (r.error) return `Roles not updated (${r.error}).`;
   if (r.noRoles) return r.tooHigh && r.tooHigh.length
     ? `No roles changed: the matching roles (${r.tooHigh.slice(0, 5).join(", ")}${r.tooHigh.length > 5 ? "…" : ""}) are above the bot's role. Move the bot's role above them in Server Settings → Roles.`
