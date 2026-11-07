@@ -1870,7 +1870,7 @@ function eventEmbed(e, heading, colour) {
 async function postEventMessage(env, e, kind, replyTo) {
   if (!CONFIG.EVENTS_CHANNEL_ID) return null;
   const heading = { new: "**New event scheduled**", r30: "**Starts in 30 minutes**", r0: "**Starting now**",
-                    cancel: "**Cancelled**" }[kind] || "";
+                    cancel: "**Cancelled**", update: "**Event updated**" }[kind] || "";
   const ping = CONFIG.EVENT_PING_ROLE_ID && kind !== "cancel" ? `<@&${CONFIG.EVENT_PING_ROLE_ID}>` : "";
   const body = { content: ping, embeds: [eventEmbed(e, heading, kind === "cancel" ? CONFIG.COLOURS.denied : null)],
     allowed_mentions: ping ? { parse: [], roles: [CONFIG.EVENT_PING_ROLE_ID] } : NO_PINGS };
@@ -2104,16 +2104,28 @@ async function discordIdForEmp(env, emp) {
   return (l && l.ok && (l.links || [])[0] && l.links[0].discordId) || "";
 }
 /** Posts a booking in CONFIG.EVENT_BOOKINGS_CHANNEL_ID (pinging the host and supervisor); kept so a cancel can delete it. */
-async function postBooking(env, e, b) {
+function bookingText(e, b) {
   const who = (id, name) => id ? `<@${id}>` : (name || "None");
   const s = ts(e.start);
-  const content = [
+  return [
     `Host: ${who(b.hostId, e.host)}`,
     `Co-Host(s): ${b.co.length ? b.co.map(p => `<@${p.id}>`).join(", ") : "None"}`,
     `Event Type: ${b.type}`,
     `Time: <t:${s}:F> (<t:${s}:R>) · ${fmtMins(e.minutes)}`,
     `Supervisor: ${b.supId ? `<@${b.supId}>` : (b.supName || "None")}`,
     `Notes: ${b.notes ? b.notes.slice(0, 1500) : "None"}`].join("\n");
+}
+/** A booking post read back (for /event edit): who's pinged in it, its type and notes. */
+function parseBooking(text) {
+  const tx = String(text || ""), line = k => (tx.match(new RegExp("^" + k + ": ?(.*)$", "m")) || [])[1] || "";
+  const ids = v => (String(v).match(/<@!?(\d+)>/g) || []).map(x => x.replace(/\D/g, ""));
+  const plain = v => ids(v).length || v === "None" ? "" : v;
+  const host = line("Host"), sup = line("Supervisor"), notes = (tx.match(/^Notes: ([\s\S]*)$/m) || [])[1] || "";
+  return { found: true, hostId: ids(host)[0] || "", hostName: plain(host), co: ids(line("Co-Host\\(s\\)")).map(id => ({ id })),
+    type: line("Event Type"), supId: ids(sup)[0] || "", supName: plain(sup), notes: notes === "None" ? "" : notes };
+}
+async function postBooking(env, e, b) {
+  const content = bookingText(e, b);
   const msg = await discord(env, "POST", `/channels/${CONFIG.EVENT_BOOKINGS_CHANNEL_ID}/messages`,
     { content, allowed_mentions: { parse: [], users: [b.hostId, b.supId].filter(Boolean) } });
   if (msg && msg.id && env.BOT_KV) await kvPut(env, "bookpost:" + evKey(e), msg.id, 40 * 86400);
@@ -2248,6 +2260,9 @@ async function evpOpen(env, i, o) {
   try {
     const gate = await canManage(env, i);
     if (!gate.ok) return editReply(env, i, gate.error);
+    // One booking at a time: say so before the form is filled in (the roster checks again when it's booked).
+    const bc = await bridge(env, { action: "bookingCheck", byId: caller(i).id, byName: caller(i).username || "" }).catch(() => null);
+    if (bc && bc.ok !== false && bc.blocked) return editReply(env, i, bc.error);
     const roster = await loadRoster(env).catch(() => null);
     const me = gate.me || (roster ? findPerson(roster, i) : null);
     const u = caller(i), dev = o.timezone || o.__tz === "roster" ? "" : await deviceTz(env, u.id);
@@ -2364,6 +2379,112 @@ async function eventCancel(env, i, o) {
     await editReply(env, i, `**${e.title}** (<t:${ts(start)}:F>) has been cancelled and removed from the HQ.` + note);
   } catch (err) {
     await editReply(env, i, "Couldn't cancel it: " + err.message).catch(() => {});
+  }
+}
+
+// ---- /event edit: the person who booked it delays it or moves it, changes its length, co-hosts, supervisor or notes ----
+async function eventEdit(env, i, o) {
+  try {
+    const gate = await canManage(env, i);
+    if (!gate.ok) return editReply(env, i, gate.error);
+    const [startText, ...rest] = String(o.event || "").split("|");
+    const start0 = Number(startText), title = rest.join("|");
+    if (!start0 || !title) return editReply(env, i, "Pick the event from the list as you type.");
+    const u = caller(i), users = (((i.data || {}).resolved || {}).users || {});
+    const uname = id => String((users[id] || {}).username || "");
+    let roster = null;
+    const getRoster = async () => roster || (roster = await loadRoster(env).catch(() => null));
+    const changes = {};
+    let tzNote = "";
+    if (o.delay && (o.date || o.time)) return editReply(env, i, "Use either **delay** or a new **date** / **time**, not both.");
+    if (o.delay) changes.delay = Math.round(Number(o.delay));
+    if (o.date || o.time) {
+      // Read in their device's time zone, else their roster one, else UTC (as /event schedule). A missing date or
+      // time keeps the event's own.
+      const me = gate.me || findPerson(await getRoster() || { list: [], by: {} }, i);
+      const tz = (await deviceTz(env, u.id)) || (me && me.z) || "UTC+0";
+      const fixed = tzOffsetMinutes(tz), off = fixed !== null ? fixed : zoneOffset(validZone(tz), start0);
+      const local = new Date(start0 + off * 60000).toISOString();
+      const when = parseWhen(o.date || local.slice(0, 10), o.time || local.slice(11, 16), tz);
+      if (when.error) return editReply(env, i, when.error);
+      changes.start = when.ms;
+      tzNote = `\n-# Time read in ${zoneLabel(tz, when.ms)}.`;
+    }
+    if (o.length) changes.minutes = Math.round(Number(o.length));
+    let supId = "";
+    if (o.remove_supervisor && o.supervisor) return editReply(env, i, "Pick a new **supervisor** or **remove_supervisor**, not both.");
+    if (o.remove_supervisor) changes.supervisor = "";
+    if (o.supervisor) {
+      const sv = await supervisorFor(env, await getRoster(), String(o.supervisor), uname(o.supervisor));
+      if (sv.error) return editReply(env, i, "**Supervisor:** " + sv.error);
+      changes.supervisor = sv.name; supId = String(o.supervisor);
+    }
+    if (o.notes !== undefined) changes.notes = /^(none|-)$/i.test(String(o.notes).trim()) ? "" : String(o.notes);
+    let addCo = "";
+    if (o.add_cohost) {
+      const p = await rosterPersonForUser(env, await getRoster(), String(o.add_cohost), uname(o.add_cohost));
+      if (!p) return editReply(env, i, `<@${o.add_cohost}> isn't on the roster (or linked with /link), so they can't co-host.`);
+      addCo = String(o.add_cohost);
+    }
+    const remCo = o.remove_cohost ? String(o.remove_cohost) : "";
+    if (!Object.keys(changes).length && !addCo && !remCo)
+      return editReply(env, i, "Nothing to change. Use **delay**, a new **date** / **time**, **length**, **add_cohost**, **remove_cohost**, **supervisor**, **remove_supervisor** or **notes**.");
+    const res = await bridge(env, { action: "editEvent", id: "eve-" + i.id, start: start0, title, changes, byId: u.id, byName: u.username || "" })
+      .catch(err => ({ ok: false, error: err.message }));
+    if (!res.ok) return editReply(env, i, res.notMine || res.gap ? res.error : "Couldn't change it: " + res.error);
+    const oldE = { start: res.oldStart, title: res.title };
+    const e = { start: res.start, minutes: res.minutes, title: res.title, host: res.host, description: res.description };
+    const moved = res.start !== res.oldStart, timeChanged = moved || res.minutes !== res.oldMinutes;
+    const lines = [];
+    if (moved) lines.push(`**Time:** now <t:${ts(res.start)}:F> (<t:${ts(res.start)}:R>), was <t:${ts(res.oldStart)}:F>` + (o.delay ? ` (delayed ${fmtMins(Math.round(Number(o.delay)))})` : ""));
+    if (res.minutes !== res.oldMinutes) lines.push(`**Length:** ${fmtMins(res.minutes)} (was ${fmtMins(res.oldMinutes)})`);
+    if (res.supervisor !== res.oldSupervisor) lines.push(`**Supervisor:** ${supId ? `<@${supId}>` : res.supervisor || "none"}${res.oldSupervisor ? ` (was ${res.oldSupervisor})` : ""}`);
+    if (changes.notes !== undefined) lines.push(`**Notes:** ${res.notes || "none"}`);
+    let note = "";
+    // The bookings post: changed in place (moved to its new time's key), with a reply pinging whoever it affects.
+    if (CONFIG.EVENT_BOOKINGS_CHANNEL_ID) {
+      try {
+        const ch = CONFIG.EVENT_BOOKINGS_CHANNEL_ID;
+        const postId = await kvGet(env, "bookpost:" + evKey(oldE), null);
+        const m = postId ? await discord(env, "GET", `/channels/${ch}/messages/${postId}`).catch(() => null) : null;
+        const b = m ? parseBooking(m.content) : { found: false, hostId: "", hostName: "", co: [], type: res.title, supId: "", supName: "", notes: "" };
+        const before = b.co.map(x => x.id);
+        if (addCo && before.indexOf(addCo) === -1) { b.co.push({ id: addCo }); lines.push(`**Co-host added:** <@${addCo}>`); }
+        else if (addCo) lines.push(`<@${addCo}> was already a co-host.`);
+        if (remCo) { if (before.indexOf(remCo) !== -1) { b.co = b.co.filter(x => x.id !== remCo); lines.push(`**Co-host removed:** <@${remCo}>`); } else lines.push(`<@${remCo}> wasn't a co-host.`); }
+        if (changes.supervisor !== undefined) { b.supId = supId; b.supName = res.supervisor; }
+        if (changes.notes !== undefined || !m) b.notes = res.notes;      // else the post keeps its own notes
+        if (m) {
+          await discord(env, "PATCH", `/channels/${ch}/messages/${postId}`, { content: bookingText(e, b), allowed_mentions: NO_PINGS });
+          if (moved && env.BOT_KV) { await kvPut(env, "bookpost:" + evKey(e), postId, 40 * 86400); await env.BOT_KV.delete("bookpost:" + evKey(oldE)).catch(() => {}); }
+        } else await postBooking(env, e, b);
+        const ping = new Set();
+        if (timeChanged) [b.hostId, b.supId].concat(b.co.map(x => x.id)).forEach(x => x && ping.add(x));
+        if (addCo) ping.add(addCo);
+        if (supId) ping.add(supId);
+        if (m && lines.length) await discord(env, "POST", `/channels/${ch}/messages`, { content: `**Booking updated: ${b.type || res.title}**\n` + lines.join("\n") +
+          (ping.size ? "\n-# " + [...ping].map(x => `<@${x}>`).join(" ") : ""), message_reference: { message_id: postId, fail_if_not_exists: false },
+          allowed_mentions: { parse: [], users: [...ping] } });
+        note += `\nThe booking in <#${ch}> was updated.`;
+      } catch (err) { note += `\nThe booking post wasn't updated (${err.message}).`; }
+    }
+    // The events channel: reminders follow the new time, and a short "Event updated" note.
+    try {
+      const st = await kvGet(env, "state:events", null);
+      const ko = evKey(oldE), kn = evKey(e);
+      if (st && ko !== kn) {
+        ["seen", "msg"].forEach(k => { if (st[k] && st[k][ko] !== undefined) { st[k][kn] = st[k][ko]; delete st[k][ko]; } });
+        ["r30", "r0"].forEach(k => { if (st[k]) { delete st[k][ko]; delete st[k][kn]; } });
+        await kvPut(env, "state:events", st);
+      }
+      if (timeChanged || res.supervisor !== res.oldSupervisor || changes.notes !== undefined) {
+        const msg = await postEventMessage(env, e, "update", st && st.msg && st.msg[kn]);
+        if (msg) note += ` Posted in <#${CONFIG.EVENTS_CHANNEL_ID}>.`;
+      }
+    } catch (err) { /* the HQ change is what matters */ }
+    await editReply(env, i, `**${res.title}** updated.\n` + (lines.length ? lines.join("\n") : "No changes to the HQ event.") + note + tzNote);
+  } catch (err) {
+    await editReply(env, i, "Couldn't change it: " + err.message).catch(() => {});
   }
 }
 
@@ -3821,6 +3942,7 @@ async function handleCommunity(i, env, ctx) {
     if (needsRoster && !linked(env) && !(name === "event" && (f.sub === "list" || f.sub === "log"))) return reply("The roster isn't linked yet.");
     if (name === "event" && f.sub === "schedule") { ctx.waitUntil(o.title && o.date && o.time ? eventSchedule(env, i, o) : evpOpen(env, i, o)); return deferred(); }
     if (name === "event" && f.sub === "cancel") { ctx.waitUntil(eventCancel(env, i, o)); return deferred(); }
+    if (name === "event" && f.sub === "edit") { ctx.waitUntil(eventEdit(env, i, o)); return deferred(); }
     if (name === "event" && f.sub === "list") { ctx.waitUntil(eventList(env, i)); return deferred(o); }
     if (name === "event" && f.sub === "log") return eventLogStart(env, ctx, o, i);
     if (name === "profile") { ctx.waitUntil(profileCommand(env, i, o)); return deferred(o); }
@@ -3858,6 +3980,17 @@ const COMMUNITY_COMMANDS = [
       { type: 6, name: "supervisor", description: "Supervisor, if the event needs one (System Inspector or above)", required: false }] },
     { type: 1, name: "cancel", description: "Cancel an event you booked", options: [
       { type: 3, name: "event", description: "Start typing the event's name", required: true, autocomplete: true }] },
+    { type: 1, name: "edit", description: "Change an event you booked: delay it, new time, length, co-hosts, supervisor, notes", options: [
+      { type: 3, name: "event", description: "Start typing the event's name", required: true, autocomplete: true },
+      { type: 4, name: "delay", description: "Push it back by this many minutes", required: false, min_value: 1, max_value: 720 },
+      { type: 3, name: "date", description: "New date: DD/MM/YYYY, YYYY-MM-DD, today or tomorrow (default: the same day)", required: false, max_length: 12 },
+      { type: 3, name: "time", description: "New start time, 24-hour HH:MM, in your time zone", required: false, max_length: 8 },
+      { type: 4, name: "length", description: "New length in minutes", required: false, min_value: 5, max_value: 720 },
+      { type: 6, name: "add_cohost", description: "Add a co-host", required: false },
+      { type: 6, name: "remove_cohost", description: "Remove a co-host", required: false },
+      { type: 6, name: "supervisor", description: "New supervisor (System Inspector or above)", required: false },
+      { type: 5, name: "remove_supervisor", description: "Remove the supervisor", required: false },
+      { type: 3, name: "notes", description: "New notes (type none to clear them)", required: false, max_length: 900 }] },
     { type: 1, name: "log", description: "Log an event for approval", options: [
         { type: 3, name: "type", description: "What kind of event it was", required: true,
           choices: EVENT_TYPES.map(t => ({ name: t, value: t })) },
