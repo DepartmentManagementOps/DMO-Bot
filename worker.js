@@ -774,6 +774,11 @@ function requestPanelAction(env, ctx, i) {
     if (k === "ref") return Object.assign({}, f, { value: st.ref ? "**" + st.ref + "**" : "None" });
     return f;
   });
+  // An award they already hold on the roster: no request needed; the panel becomes the result (just after the redraw).
+  if (/^aw:pick:/.test(id) && st.award && st.roblox && linked(env) && ctx && ctx.waitUntil) ctx.waitUntil((async () => {
+    const held = await awardHeld(env, st.roblox, "", st.award);
+    if (held) await editOriginal(env, i, { content: "", embeds: [await awardHeldResult(env, i, held, st.award)], components: [], allowed_mentions: NO_PINGS });
+  })().catch(() => {}));
   return { type: R.UPDATE, data: { embeds: [e], components: comps } };
 }
 
@@ -840,6 +845,33 @@ function updateText(st, submitter) {
   return lines.join("\n");
 }
 
+// ---- Awards they already hold on the roster: no request; their Discord roles are brought in line instead ----
+async function awardHeld(env, roblox, discordName, award) {
+  if (!award || (!roblox && !discordName)) return null;
+  const r = await bridge(env, { action: "roleinfoName", roblox: cleanLine(roblox, 40).replace(/^@/, ""), discord: cleanLine(discordName, 40).replace(/^@/, "") }).catch(() => null);
+  const p = r && r.ok !== false && r.person;
+  if (!p || !(p.aw || []).some(a => String(a).toLowerCase() === String(award).toLowerCase())) return null;
+  return { person: p, awardNames: r.awardNames || [] };
+}
+/** Gives the roles for an award already on the roster. Returns the embed to show instead of sending the request. */
+async function awardHeldResult(env, i, held, award) {
+  const p = held.person, u = caller(i);
+  let id = await discordIdForEmp(env, p.e);
+  if (!id) {     // not linked by employee number, but it's the person asking
+    const mine = await bridge(env, { action: "links", discordId: u.id }).catch(() => null);
+    if (mine && mine.ok && (mine.links || []).some(l => normEmp(l.emp) === normEmp(p.e))) id = u.id;
+  }
+  const lines = [`**${p.n}** already has **${award}** on the roster, so no request was sent.`];
+  if (!id) lines.push("Their Discord account isn't linked to the roster yet, so the Discord role couldn't be given. Once they run **/link**, they get it.");
+  else {
+    const r = CONFIG.GUILD_ID ? await syncRolesFor(env, id, p.e, "link", null, { person: p, awardNames: held.awardNames }).catch(err => ({ error: err.message })) : { error: "GUILD_ID isn't set" };
+    if (r.held) lines.push(roleSummary(r));
+    else if (r.error) lines.push(`The Discord role couldn't be given (${r.error}). Ask staff, or run **/link** later.`);
+    else lines.push(r.added.length ? `${id === u.id ? "Your" : `<@${id}>'s`} Discord roles have been updated to match the roster.` : `${id === u.id ? "You" : `<@${id}>`} already ${id === u.id ? "have" : "has"} the Discord roles for it.`);
+  }
+  return { color: CONFIG.COLOURS.approved, author: { name: CONFIG.NAME }, title: "Already awarded", description: lines.join("\n\n"), timestamp: new Date().toISOString() };
+}
+
 async function sendRequest(env, i, type, st, att) {
   const t = REQUESTS[type];
   const channel = requestChannel(type);
@@ -853,6 +885,10 @@ async function sendRequest(env, i, type, st, att) {
         description: check.problems.map(p => "• " + p).join("\n").slice(0, 3800) + "\n\nRun **" + (st.code ? "/roster submit" : st.mode === "edit" ? "/loaedit" : "/" + t.command) + "** again." };
       if (fromPanel) await finish(embed); else await editOriginal(env, i, { embeds: [embed], allowed_mentions: NO_PINGS });
       return;
+    }
+    if (type === "award" && linked(env)) {
+      const held = await awardHeld(env, st.roblox, "", st.award);
+      if (held) return finish(await awardHeldResult(env, i, held, st.award));
     }
     const title = type === "roster" && st.mode === "update" ? t.updateTitle : type === "loa" && st.mode === "edit" ? t.editTitle : t.title;
     st.hasProof = !!att;
