@@ -24,7 +24,7 @@
 //              ranks and awards come from the roster as you type; LOA is MR+ only.
 //              Roster + LOA requests can be approved or denied right here too
 //              (reviewers), or on the roster's Approvals page.
-//   /event schedule|cancel|list, /profile, /leaderboard, /mystats, /link,
+//   /event schedule|cancel|list, /profile, /leaderboard, /mystats, /link, /kudos,
 //   /roster start|submit -> see "COMMUNITY FEATURES" further down.
 //   Every 5 minutes (Cron Trigger "*/5 * * * *"): event announcements and
 //   reminders, promotion posts, announcement mirror, Monday digest,
@@ -1765,6 +1765,7 @@ async function robloxHeadshot(username) {
 //   /profile [member]                   public profile card
 //   /leaderboard                        this month's top hosts + attendees
 //   /mystats                            your month: events by type, quota, LOA, Market points
+//   /kudos give | list | top            thank another member (shows on their profile)
 //   /link                               link a Discord account to its roster entry
 //   /roster start | submit              code-checked roster applications
 //   Approve / Deny on roster + LOA requests in Discord (reviewers)
@@ -2677,6 +2678,56 @@ async function leaderboardCommand(env, i) {
       footer: { text: "Months run from the 1st at 06:00 UTC" } }]);
   } catch (err) {
     await editReply(env, i, "Couldn't load the leaderboard: " + err.message).catch(() => {});
+  }
+}
+
+// ---- /kudos: thank another member (give), see someone's kudos (list), this month's most thanked (top) ----
+// Kept on the HQ (bot.js: kudosGive / kudosList / kudosTop). 3 every 7 days, the same person once in that time.
+// A kudos is posted in the channel (pinging only the person thanked) and shows on their public profile.
+const KUDOS_COLOUR = 0xE8A33D;
+async function kudosCommand(env, i, sub, o) {
+  try {
+    const u = caller(i);
+    if (sub === "give") {
+      const to = ((i.data.resolved || {}).users || {})[o.member] || {};
+      if (to.bot) return editReply(env, i, "Bots can't get kudos.");
+      if (to.id && to.id === u.id) return editReply(env, i, "You can't give kudos to yourself.");
+      const r = await bridge(env, { action: "kudosGive", byId: u.id, byName: u.username || "", toId: o.member, toName: to.username || "", reason: o.reason });
+      if (!r.ok) return editReply(env, i, "Not sent: " + (r.error || "the roster didn't answer.") + (r.nextAt ? ` You can again <t:${ts(Date.parse(r.nextAt))}:R>.` : ""));
+      const k = r.kudos, c = r.counts || {};
+      const link = profileUrl(env, k.toEmp);
+      await discord(env, "POST", `/webhooks/${CONFIG.APP_ID}/${i.token}`, {
+        content: `<@${o.member}>`, allowed_mentions: { parse: [], users: [String(o.member)] },
+        embeds: [{ color: KUDOS_COLOUR, author: { name: "Kudos" },
+          description: `**${k.from}** gave kudos to **${k.to}**\n> ${k.reason.replace(/\n/g, " ")}`,
+          footer: { text: `${k.to} has ${c.total} kudos` + (c.month ? ` · ${c.month} this month` : "") },
+          url: link || undefined, timestamp: k.at }] });
+      return editReply(env, i, "Sent. " + (r.left > 0 ? `You can give ${r.left} more in the next 7 days.` : "That was your last one for now: you get another 7 days after your oldest one this week."));
+    }
+    if (sub === "list") {
+      const pick = o.member ? { forId: o.member, forName: ((((i.data.resolved || {}).users || {})[o.member]) || {}).username || "" } : {};
+      const r = await bridge(env, Object.assign({ action: "kudosList", byId: u.id, byName: u.username || "", name: cleanLine(o.name, 60) }, pick));
+      if (!r.ok) throw new Error(r.error || "the roster didn't answer");
+      if (!r.person) return editReply(env, i, o.member || o.name ? "They aren't on the roster (or haven't linked with **/link**)." : "You aren't on the roster under your Discord account. Use **/link** first.");
+      const c = r.counts || {};
+      const lines = (r.recent || []).map(k => `> ${k.reason}\n— **${k.from}**, <t:${ts(Date.parse(k.at))}:D>`);
+      const link = profileUrl(env, r.person.emp);
+      return editReply(env, i, "", [{ color: KUDOS_COLOUR, author: { name: "Kudos" }, title: r.person.name, url: link || undefined,
+        description: (`**${c.total}** kudos` + (c.month ? ` · ${c.month} this month` : "") + "\n\n" + (lines.join("\n\n") || "No kudos yet.")).slice(0, 4000),
+        footer: r.left !== null && r.left !== undefined ? { text: `You can give ${r.left} more kudos in the next 7 days.` } : undefined }]);
+    }
+    if (sub === "top") {
+      const r = await bridge(env, { action: "kudosTop" });
+      if (!r.ok) throw new Error(r.error || "the roster didn't answer");
+      const medal = ["🥇", "🥈", "🥉"];
+      const rows = (r.top || []).map((p, k) => `${medal[k] || "`" + String(k + 1).padStart(2) + "`"} **${p.name}**: ${p.count} kudos` + (p.givers !== p.count ? ` from ${p.givers} people` : ""));
+      return editReply(env, i, "", [{ color: KUDOS_COLOUR, author: { name: "Kudos" }, title: "Most thanked · " + r.month,
+        description: rows.join("\n") || "No kudos yet this month. Thank someone with **/kudos give**.",
+        footer: { text: r.total + " kudos given this month" } }]);
+    }
+    return editReply(env, i, "Unknown option.");
+  } catch (e) {
+    return editReply(env, i, "Couldn't do that: " + (e.message || e));
   }
 }
 
@@ -3947,7 +3998,7 @@ async function handleCommunity(i, env, ctx) {
   const f = flatOptions(i);
   const o = f.opts;
 
-  if (i.type === T.AUTOCOMPLETE && ["event", "profile", "link", "roster"].indexOf(name) !== -1) {
+  if (i.type === T.AUTOCOMPLETE && ["event", "profile", "link", "roster", "kudos"].indexOf(name) !== -1) {
     const focused = f.focused || {};
     const typed = String(focused.value || "");
     let choices = [];
@@ -3974,7 +4025,7 @@ async function handleCommunity(i, env, ctx) {
   }
 
   if (i.type === T.COMMAND) {
-    const needsRoster = ["event", "profile", "leaderboard", "mystats", "myloa", "loaedit", "link", "roster"].indexOf(name) !== -1;
+    const needsRoster = ["event", "profile", "leaderboard", "mystats", "myloa", "loaedit", "link", "roster", "kudos"].indexOf(name) !== -1;
     if (needsRoster && !linked(env) && !(name === "event" && (f.sub === "list" || f.sub === "log"))) return reply("The roster isn't linked yet.");
     if (name === "event" && f.sub === "schedule") { ctx.waitUntil(o.title && o.date && o.time ? eventSchedule(env, i, o) : evpOpen(env, i, o)); return deferred(); }
     if (name === "event" && f.sub === "cancel") { ctx.waitUntil(eventCancel(env, i, o)); return deferred(); }
@@ -3986,6 +4037,7 @@ async function handleCommunity(i, env, ctx) {
     if (name === "mystats") { ctx.waitUntil(myStatsCommand(env, i)); return deferred(); }
     if (name === "myloa") { ctx.waitUntil(myLoaCommand(env, i)); return deferred(); }
     if (name === "loaedit") { ctx.waitUntil(loaEditCommand(env, i, o)); return deferred(); }
+    if (name === "kudos") { ctx.waitUntil(kudosCommand(env, i, f.sub, o)); return deferred(f.sub === "give" ? null : o); }
     if (name === "market") { ctx.waitUntil(marketCommand(env, i)); return deferred(); }
     if (name === "link") { ctx.waitUntil(linkCommand(env, i, o)); return deferred(); }
     if (name === "roster" && f.sub === "start") { ctx.waitUntil(rosterStart(env, i)); return deferred(); }
@@ -4051,6 +4103,16 @@ const COMMUNITY_COMMANDS = [
     { type: 3, name: "which", description: "Which LOA (default: your current one, else your next one)", required: false,
       choices: [{ name: "My current LOA", value: "current" }, { name: "My next upcoming LOA", value: "next" }] },
     { type: 3, name: "notes", description: "Anything else", required: false, max_length: 300 }] },
+  { name: "kudos", description: "Thank another member: it shows on their profile", dm_permission: false, options: [
+    { type: 1, name: "give", description: "Give someone kudos for something they did (3 every 7 days)", options: [
+      { type: 6, name: "member", description: "Who you're thanking", required: true },
+      { type: 3, name: "reason", description: "What they did (shown on their profile)", required: true, min_length: 10, max_length: 200 }] },
+    { type: 1, name: "list", description: "Someone's kudos (default: yours)", options: [
+      { type: 6, name: "member", description: "Pick a server member", required: false },
+      { type: 3, name: "name", description: "Or type a Roblox or Discord name", required: false, autocomplete: true, max_length: 60 },
+      { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] },
+    { type: 1, name: "top", description: "This month's most thanked members", options: [
+      { type: 5, name: "share", description: "Post it in the channel (default: only you see it)", required: false }] }] },
   { name: "link", description: "Link to your roster entry and get your rank, department, award and staff roles", dm_permission: false, options: [
     { type: 3, name: "name", description: "First time: pick your roster name. Already linked: leave empty to update your roles", required: false, autocomplete: true, max_length: 60 }] },
   { name: "roster", description: "Apply to be rostered, or update your rank / details", dm_permission: false, options: [
