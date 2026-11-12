@@ -3992,6 +3992,10 @@ async function cronRoles(env, now) {
 // ---------------------------------------------------------------------
 // Routing for the commands above (called first from handle()).
 // Returns a response, or null for anything that isn't one of these.
+// The server's Verified role: /roster needs it.
+const VERIFIED_ROLE = "1488588423202869248";
+const isVerified = i => !!(i.member && Array.isArray(i.member.roles) && i.member.roles.includes(VERIFIED_ROLE));
+
 // ---------------------------------------------------------------------
 async function handleCommunity(i, env, ctx) {
   const name = i.data && i.data.name;
@@ -4025,6 +4029,9 @@ async function handleCommunity(i, env, ctx) {
   }
 
   if (i.type === T.COMMAND) {
+    // /roster (start, update, submit): only for members who've verified (they have the Verified role).
+    if (name === "roster" && !isVerified(i))
+      return reply("You need to verify first. Get the <@&" + VERIFIED_ROLE + "> role, then run /roster again.");
     const needsRoster = ["event", "profile", "leaderboard", "mystats", "myloa", "loaedit", "link", "roster", "kudos"].indexOf(name) !== -1;
     if (needsRoster && !linked(env) && !(name === "event" && (f.sub === "list" || f.sub === "log"))) return reply("The roster isn't linked yet.");
     if (name === "event" && f.sub === "schedule") { ctx.waitUntil(o.title && o.date && o.time ? eventSchedule(env, i, o) : evpOpen(env, i, o)); return deferred(); }
