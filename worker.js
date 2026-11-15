@@ -2104,7 +2104,7 @@ async function eventSchedule(env, i, o) {
       supervisor = sv.name;
     }
     // The supervisor is kept as the description's first line ("Supervisor: name"), so the website shows it too.
-    const e = { start: when.ms, minutes: minutes, title: cleanLine(o.title, 100), host: host, hostEmp: hp ? (hp.e || "") : "",
+    const e = { start: when.ms, minutes: minutes, title: cleanLine(o.title, 100), host: host, hostEmp: hp ? (hp.e || "") : "", type: o.__type || "",
                 description: ((supervisor ? "Supervisor: " + supervisor + "\n" : "") + String(o.description || "").trim()).slice(0, 1000) };
     const u = caller(i);
     const res = await bridge(env, { action: "scheduleEvent", id: "ev-" + i.id, event: e, byId: u.id, byName: u.username || "" })
@@ -2189,8 +2189,9 @@ function eventScheduleButton(env, ctx, i) {
 // State lives in the components' custom_ids ("evp:<action>:<type>~<day>~<HHMM>~<min>~<step>~<from>~<zone>");
 // title, details and the people (host, co-hosts, supervisor: "<@id> · roster name") in the message's own fields.
 const EVP_GAP = 3600000, EVP_DAYS = 14, EVP_STEP = 30, EVP_LEN = 30;   // EVP_LEN: default event length (minutes)
-const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || EVP_LEN, st.p || 1, st.f || "", st.z || ""].join("~");
-function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || EVP_LEN, p: +p[4] || 1, f: p[5] || "", z: p.slice(6).join("~") }; }
+// q: 1 = they already have an event booked, so this form only books a qualification (those are outside that rule).
+const evpEnc = st => [st.t === null || st.t === undefined ? "" : st.t, st.d || "", st.h || "", st.m || EVP_LEN, st.p || 1, st.f || "", st.q ? 1 : "", st.z || ""].join("~");
+function evpDec(str) { const p = String(str || "").split("~"); return { t: p[0] === "" ? null : +p[0], d: p[1] || "", h: p[2] || "", m: +p[3] || EVP_LEN, p: +p[4] || 1, f: p[5] || "", q: p[6] === "1" ? 1 : 0, z: p.slice(7).join("~") }; }
 const EVP_FROM = { d: "your device", r: "your roster time zone", t: "as typed", u: "no time zone saved" };
 function tzOff(tz, ms) { const f = tzOffsetMinutes(tz); if (f !== null) return f; const z = validZone(tz); return z ? zoneOffset(z, ms) : 0; }
 function wallToMs(tz, y, mo, d, h, mi) { const wall = Date.UTC(y, mo - 1, d, h, mi); let ms = wall - tzOff(tz, wall) * 60000; return wall - tzOff(tz, ms) * 60000; }
@@ -2206,6 +2207,10 @@ function evpDays(tz) {
   }
   return out;
 }
+// Qualifications (SS / CO Qualification) are outside the booking cooldowns: any start time is free for one, and a
+// booked one doesn't take times away from other events (the roster applies the same rule when it books).
+const isQualType = t => /qualification/i.test(String(t || ""));
+const evpBusyFor = (st, busy) => st.t !== null && isQualType(EVENT_TYPES[st.t]) ? [] : (busy || []).filter(r => !r.qual);
 /** Free start times on that day (in their time zone) for an event of that length. */
 function evpFree(tz, dayKey, minutes, busy) {
   const p = dayParts(dayKey), out = [], seen = {}, soon = Date.now() + 5 * 60000;
@@ -2248,7 +2253,8 @@ function evpFields(message) {
   return { title: v("Title"), details: v("Details"), host: evpPeople(f.Host)[0] || null, co: evpPeople(f["Co-hosts"]), sup: evpPeople(f.Supervisor)[0] || null };
 }
 function evpView(st, x, busy, note) {
-  const days = evpDays(st.z), free = st.d ? evpFree(st.z, st.d, st.m, busy) : [];
+  const days = evpDays(st.z), free = st.d ? evpFree(st.z, st.d, st.m, evpBusyFor(st, busy)) : [];
+  const qual = st.t !== null && isQualType(EVENT_TYPES[st.t]);
   if (st.h && !free.some(t => t.hhmm === st.h)) { st.h = ""; if (st.p === 3) st.p = 2; }   // taken, or too long now
   const chosen = st.h ? free.find(t => t.hhmm === st.h) : null;
   const day = st.d ? days.find(d => d.key === st.d) : null;
@@ -2262,9 +2268,12 @@ function evpView(st, x, busy, note) {
   const embed = { author: { name: CONFIG.NAME }, color: CONFIG.COLOURS.draft, footer: { text: `Step ${st.p} of 3 · Only you can see this` } };
   let rows;
   if (st.p === 1) {
-    Object.assign(embed, { title: "Book an event", description: "Choose the type of event and the day." + (sofar ? "\n\n" + sofar : "") + "\n" + zoneLine, fields: keep });
+    Object.assign(embed, { title: st.q ? "Book a qualification" : "Book an event", description: (st.q
+      ? "You already have an event booked, and you can only have one at a time. Qualifications are outside that rule, so you can still book one here."
+      : "Choose the type of event and the day.") + (sofar ? "\n\n" + sofar : "") + "\n" + zoneLine, fields: keep });
+    const types = EVENT_TYPES.map((t, k) => ({ label: t, value: String(k), default: st.t === k })).filter(o => !st.q || isQualType(o.label));
     rows = [
-      { type: 1, components: [{ type: 3, custom_id: "evp:type:" + enc(), placeholder: "Type of event", options: EVENT_TYPES.map((t, k) => ({ label: t, value: String(k), default: st.t === k })) }] },
+      { type: 1, components: [{ type: 3, custom_id: "evp:type:" + enc(), placeholder: st.q ? "Which qualification" : "Type of event", options: types }] },
       { type: 1, components: [{ type: 3, custom_id: "evp:day:" + enc(), placeholder: "Day", options: days.map(d => ({ label: d.label, description: d.description, value: d.key, default: d.key === st.d })) }] },
       { type: 1, components: [btn("Next: start time", "to2", 1, st.t === null || !st.d), btn("Cancel", "cancel", 2)] }];
   } else if (st.p === 2) {
@@ -2272,7 +2281,8 @@ function evpView(st, x, busy, note) {
     const sel = (id, list, ph, empty) => ({ type: 1, components: [list.length
       ? { type: 3, custom_id: "evp:" + id + ":" + enc(), placeholder: ph, options: list.slice(0, 25).map(t => ({ label: t.label, value: t.hhmm, default: t.hhmm === st.h })) }
       : { type: 3, custom_id: "evp:" + id + ":" + enc(), placeholder: empty, disabled: true, options: [{ label: "none", value: "none" }] }] });
-    Object.assign(embed, { title: "Choose a start time", description: sofar + `\n\nOnly free times are listed: at least an hour clear of other events, for a ${fmtMins(st.m)} event.` +
+    Object.assign(embed, { title: "Choose a start time", description: sofar + (qual ? "\n\nQualifications can start at any time: they don't need to keep clear of other events."
+      : `\n\nOnly free times are listed: at least an hour clear of other events, for a ${fmtMins(st.m)} event.`) +
       (free.length ? "" : "\n**Nothing is free that day.** Go back and pick another day.") + "\n" + zoneLine, fields: keep });
     rows = [sel("am", am, "Morning (before 12:00)", "No free morning times"), sel("pm", pm, "Afternoon and evening (from 12:00)", "No free times from 12:00"),
       { type: 1, components: [btn("Next: check and book", "to3", 1, !chosen), btn("Back", "to1", 2), btn("Cancel", "cancel", 2)] }];
@@ -2299,7 +2309,9 @@ async function evpOpen(env, i, o) {
     if (!gate.ok) return editReply(env, i, gate.error);
     // One booking at a time: say so before the form is filled in (the roster checks again when it's booked).
     const bc = await bridge(env, { action: "bookingCheck", byId: caller(i).id, byName: caller(i).username || "" }).catch(() => null);
-    if (bc && bc.ok !== false && bc.blocked) return editReply(env, i, bc.error);
+    // Qualifications are outside that rule, so the form still opens for one (the roster refuses anything else).
+    if (bc && bc.ok !== false && bc.blocked && !bc.qualOk) return editReply(env, i, bc.error);
+    const qualOnly = bc && bc.ok !== false && bc.blocked ? bc.error.replace(/ To change this one, use \*\*\/event edit\*\*\.$/, "") + " Until then you can still book an **SS or CO Qualification** below." : "";
     const roster = await loadRoster(env).catch(() => null);
     const me = gate.me || (roster ? findPerson(roster, i) : null);
     const u = caller(i), dev = o.timezone || o.__tz === "roster" ? "" : await deviceTz(env, u.id);
@@ -2307,14 +2319,14 @@ async function evpOpen(env, i, o) {
     if (o.timezone && !typed) return editReply(env, i, `"${o.timezone}" isn't a time zone. Pick one from the list, or leave it empty.`);
     if (!typed && !dev && o.__tz !== "roster" && env.BOT_KV && env.SHEETS_SECRET) return eventSchedule(env, i, o);   // asks for the time zone first
     const z = typed || dev || (me && me.z ? cleanTimezone(me.z) : "UTC");
-    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || EVP_LEN)), p: 1, f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", z };
+    const st = { t: null, d: "", h: "", m: Math.max(5, Math.min(720, Number(o.length) || EVP_LEN)), p: 1, f: typed ? "t" : dev ? "d" : me && me.z ? "r" : "u", q: qualOnly ? 1 : 0, z };
     const x = { title: cleanLine(o.title, 100), host: me ? { id: u.id, name: me.r || me.d } : null, co: [], sup: null, details: String(o.description || "").trim().slice(0, 1000) };
     let supNote = "";
     if (o.supervisor) {
       const sv = await supervisorFor(env, roster, String(o.supervisor), String(((((i.data || {}).resolved || {}).users || {})[o.supervisor] || {}).username || ""));
       if (sv.name) x.sup = { id: String(o.supervisor), name: sv.name }; else supNote = sv.error;
     }
-    return editOriginal(env, i, evpView(st, x, await evpBusy(env), supNote));
+    return editOriginal(env, i, evpView(st, x, await evpBusy(env), [qualOnly, supNote].filter(Boolean).join("\n")));
   } catch (err) {
     await editReply(env, i, "Couldn't open the booking form: " + err.message).catch(() => {});
   }
@@ -2371,7 +2383,7 @@ function evpAction(env, ctx, i) {
     }
     const busy = await evpBusy(env);
     if (act === "book") {
-      const stillFree = st.d && evpFree(st.z, st.d, st.m, busy).some(t => t.hhmm === st.h);
+      const stillFree = st.d && evpFree(st.z, st.d, st.m, evpBusyFor(st, busy)).some(t => t.hhmm === st.h);
       if (!st.h || !stillFree) return editOriginal(env, i, evpView(st, x, busy, "That start time has just been taken. Pick another."));
       if (!x.title || !x.host) return editOriginal(env, i, evpView(st, x, busy));
       const p = dayParts(st.d);
