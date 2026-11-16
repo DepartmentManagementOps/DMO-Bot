@@ -447,7 +447,8 @@ async function handle(i, env, ctx) {
 
     if (action === "cancel") return { type: R.UPDATE, data: { content: "", embeds: [{ color: CONFIG.COLOURS.denied, description: "Event log cancelled. Nothing was sent." }], components: [] } };
     if (action === "dap") {
-      draft.doubleAP = !draft.doubleAP;
+      // Double AP is automatic now: the old button on panels opened earlier just redraws the panel without it.
+      draft.doubleAP = dapWindow(Date.now());
       ctx.waitUntil((async () => editOriginal(env, i, panel(draft, await loadRoster(env).catch(() => null))))().catch(() => {}));
       return { type: R.DEFER_UPDATE };
     }
@@ -1264,8 +1265,8 @@ async function eventLogStart(env, ctx, opts, i) {
   }
   const draft = blankDraft();
   draft.event = eventLabel(type, other);
-  // Double AP: on by default at the weekend (Friday 18:00 to Monday 06:00 UTC); the Double AP button changes it.
-  draft.doubleAP = opts.double_ap === true || (opts.double_ap === undefined && dapWindow(Date.now()));
+  // Double AP is automatic: on at the weekend (Friday 18:00 to Monday 06:00 UTC). It can't be set by hand here.
+  draft.doubleAP = dapWindow(Date.now());
   // Host = you, to start with (change it in the Host menu).
   const me = (i && i.member && i.member.user) || (i && i.user) || null;
   if (me && me.id) { draft.host = rosterNameFor(roster, me, i.member).name; draft.hostIds = [me.id]; }
@@ -1313,7 +1314,7 @@ function blankDraft() {
 
 function draftLog(d) {
   const attendees = uniq(d.picked.concat(d.manual));
-  return { event: d.event, doubleAP: !!d.doubleAP, date: d.date, host: d.host, supervisor: d.supervisor || "", cohosts: d.cohosts, attendees: attendees, notes: d.notes };
+  return { event: d.event, doubleAP: dapWindow(Date.now()), date: d.date, host: d.host, supervisor: d.supervisor || "", cohosts: d.cohosts, attendees: attendees, notes: d.notes };
 }
 
 function missingParts(d) {
@@ -1388,7 +1389,6 @@ function panel(d, roster) {
       { type: 1, components: [
         { type: 2, style: detailsDone ? 2 : 1, label: detailsDone ? "Edit details" : "Event details", custom_id: "d:details", emoji: { name: "📝" } },
         { type: 2, style: d.proof ? 2 : 1, label: d.proof ? "Change proof" : "Add proof", custom_id: "d:proof", emoji: { name: "📎" } },
-        { type: 2, style: d.doubleAP ? 1 : 2, label: d.doubleAP ? "Double AP: on" : "Double AP: off", custom_id: "d:dap", emoji: { name: "✨" } },
         { type: 2, style: 3, label: "Submit", custom_id: "d:submit", emoji: { name: "📨" }, disabled: done !== steps.length },
         { type: 2, style: 4, label: "Cancel", custom_id: "d:cancel" }
       ] }
@@ -4101,8 +4101,7 @@ const COMMUNITY_COMMANDS = [
     { type: 1, name: "log", description: "Log an event for approval", options: [
         { type: 3, name: "type", description: "What kind of event it was", required: true,
           choices: EVENT_TYPES.map(t => ({ name: t, value: t })) },
-        { type: 3, name: "other", description: "Only for Other: what the event was (up to 60 characters)", required: false, max_length: 60 },
-        { type: 5, name: "double_ap", description: "Double AP? Default: on at weekends (Fri 18:00 to Mon 06:00 UTC), else off", required: false }] },
+        { type: 3, name: "other", description: "Only for Other: what the event was (up to 60 characters)", required: false, max_length: 60 }] },
     { type: 1, name: "list", description: "Upcoming events, in your own time", options: [
       { type: 5, name: "share", description: "Post it in the channel for everyone (default: only you see it)", required: false }] }] },
   { name: "profile", description: "Someone's public profile", dm_permission: false, options: [
