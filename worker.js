@@ -230,6 +230,7 @@ export default {
 
     const i = JSON.parse(body);
     Object.defineProperty(i, "__request", { value: request, enumerable: false });   // the bot's own address, for links
+    await syncEventTypes(env);   // Settings ▸ Events on the site (cached; never holds the reply up for long)
     try {
       return json(await handle(i, env, ctx));
     } catch (e) {
@@ -1246,7 +1247,7 @@ function cleanTimezone(s) {
 
 // /event log: opens the private panel where everything is filled in.
 async function eventLogStart(env, ctx, opts, i) {
-  const type = EVENT_TYPES.indexOf(opts.type) !== -1 ? opts.type : "";
+  const type = EVENT_TYPES.find(t => t.toLowerCase() === String(opts.type || "").trim().toLowerCase()) || "";
   if (!type) return reply("Choose an event type: run **/event log** again and pick one.");
   const other = cleanLine(opts.other || "", EVENT_OTHER_MAX);
   if (type === "Other" && !other) return reply("For Other, describe the event in the **other** box (up to " + EVENT_OTHER_MAX + " characters), then run **/event log** again.");
@@ -1279,7 +1280,16 @@ async function eventLogStart(env, ctx, opts, i) {
 // The queue's Event column (CK) gets the exact label: "Patrol" … or
 // "Other: <what it was>".
 // ---------------------------------------------------------------------
+// The event types: the site's (Settings ▸ Events: added, renamed, reordered, removed), "Other" last. This list is only
+// the starting point until the site answers; syncEventTypes keeps it in step (changed in place).
 const EVENT_TYPES = ["Patrol", "SS Qualification", "CO Qualification", "Gamenight", "Training", "Other"];
+async function syncEventTypes(env) {
+  const fresh = EVENT_TYPES_CACHE && Date.now() - EVENT_TYPES_CACHE.at < 5 * 60000;
+  const types = fresh ? EVENT_TYPES_CACHE.types : await Promise.race([eventTypes(env).catch(() => null), new Promise(r => setTimeout(() => r(null), 900))]);
+  if (!types) return;
+  const names = Object.keys(types).filter(t => t !== "Other");
+  if (names.length) EVENT_TYPES.splice(0, EVENT_TYPES.length, ...names, "Other");
+}
 const EVENT_OTHER_MAX = 60;
 function eventLabel(type, other) { return type === "Other" ? "Other: " + other : type; }
 // "Patrol" -> {type:"Patrol"}, "Other: Mining trip" -> {type:"Other", other:"Mining trip"}, else null.
@@ -4020,6 +4030,10 @@ async function handleCommunity(i, env, ctx) {
     let choices = [];
     try {
       if (focused.name === "event") choices = await Promise.race([suggestEvents(env, typed), new Promise(r => setTimeout(() => r([]), 2500))]);
+      else if (focused.name === "type" && name === "event") {
+        const types = EVENT_TYPES_CACHE ? EVENT_TYPES_CACHE.types : null;
+        choices = EVENT_TYPES.filter(t => !types || !types[t] || types[t].enabled).filter(t => !typed || t.toLowerCase().indexOf(typed.toLowerCase()) !== -1).slice(0, 25).map(t => ({ name: t, value: t }));
+      }
       else if (focused.name === "timezone" && name === "event") choices = await zoneSuggest(env, typed, caller(i).id);
       else if (focused.name === "timezone") choices = await requestSuggest(env, ctx, focused);
       else if (focused.name === "rank") {
@@ -4099,8 +4113,7 @@ const COMMUNITY_COMMANDS = [
       { type: 5, name: "remove_supervisor", description: "Remove the supervisor", required: false },
       { type: 3, name: "notes", description: "New notes (type none to clear them)", required: false, max_length: 900 }] },
     { type: 1, name: "log", description: "Log an event for approval", options: [
-        { type: 3, name: "type", description: "What kind of event it was", required: true,
-          choices: EVENT_TYPES.map(t => ({ name: t, value: t })) },
+        { type: 3, name: "type", description: "What kind of event it was (start typing)", required: true, autocomplete: true, max_length: 40 },
         { type: 3, name: "other", description: "Only for Other: what the event was (up to 60 characters)", required: false, max_length: 60 }] },
     { type: 1, name: "list", description: "Upcoming events, in your own time", options: [
       { type: 5, name: "share", description: "Post it in the channel for everyone (default: only you see it)", required: false }] }] },
