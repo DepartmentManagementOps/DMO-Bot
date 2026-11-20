@@ -3044,7 +3044,7 @@ async function rosterStart(env, i) {
   if (had && env.BOT_KV) return editReply(env, i, `You already have a code: **${c.codes[0]}**. It's valid until <t:${Math.floor((c.at + 48 * 3600000) / 1000)}:f>. ` +
     "Use it in your screenshot and run **/roster submit**.");
   return editReply(env, i, `Your code is **${c.codes[0]}**\n\n1. In game, type **${c.codes[0]}** in the chat.\n2. Take a screenshot showing the code **next to your name**.\n` +
-    `3. Run **/roster submit** with your Roblox username, timezone, rank and the screenshot.\n\n-# The code lasts ${env.BOT_KV ? "48 hours" : "until midnight UTC tomorrow"}. ` +
+    `3. Run **/roster submit** with your Roblox username, timezone, rank and the screenshot.\n\nMembers must be 13 or older; by applying you confirm you are.\n\n-# The code lasts ${env.BOT_KV ? "48 hours" : "until midnight UTC tomorrow"}. ` +
     "Screenshots are shared with Google for an automated check; staff make the decision.");
   } catch (err) {
     await editReply(env, i, "Couldn't make your code: " + err.message).catch(() => {});
